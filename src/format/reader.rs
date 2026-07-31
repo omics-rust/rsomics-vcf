@@ -56,19 +56,51 @@ impl Reader {
     }
 
     pub(crate) fn read_header(&mut self) -> Result<(vcf::Header, Vec<u8>, HeaderTypes)> {
-        let (header, raw) = match &mut self.inner {
-            Inner::Bcf(reader) => read_bcf_header(reader),
-            Inner::BcfRaw(reader) => read_bcf_header(reader),
-            Inner::Vcf(reader) => read_vcf_header(reader),
-            Inner::VcfGz(reader) => read_vcf_header(reader),
-        }
-        .map_err(|error| invalid(&self.source, "reading VCF header", error))?;
+        let raw = self.read_raw_header()?;
+        let header = self.parse_header(&raw)?;
         let output = canonical_header(&raw)
             .map_err(|error| invalid(&self.source, "formatting VCF header", error))?;
         let types = HeaderTypes::parse(&output)
             .map_err(|error| invalid(&self.source, "reading VCF schema", error))?;
 
         Ok((header, output, types))
+    }
+
+    pub(crate) fn read_raw_header(&mut self) -> Result<Vec<u8>> {
+        match &mut self.inner {
+            Inner::Bcf(reader) => read_bcf_header(reader),
+            Inner::BcfRaw(reader) => read_bcf_header(reader),
+            Inner::Vcf(reader) => read_vcf_header(reader),
+            Inner::VcfGz(reader) => read_vcf_header(reader),
+        }
+        .map_err(|error| invalid(&self.source, "reading VCF header", error))
+    }
+
+    pub(crate) fn parse_header(&self, raw: &[u8]) -> Result<vcf::Header> {
+        let text = std::str::from_utf8(raw).map_err(|error| {
+            invalid(
+                &self.source,
+                "decoding VCF header",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?;
+        let mut header: vcf::Header = text.parse().map_err(|error| {
+            invalid(
+                &self.source,
+                "parsing VCF header",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?;
+        if !self.is_text() {
+            *header.string_maps_mut() = text.parse().map_err(|error| {
+                invalid(
+                    &self.source,
+                    "reading BCF string maps",
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?;
+        }
+        Ok(header)
     }
 
     pub(crate) fn is_text(&self) -> bool {
@@ -80,9 +112,18 @@ impl Reader {
         record: &mut Vec<u8>,
         number: usize,
     ) -> Result<usize> {
+        self.read_text_record_with_termination(record, number)
+            .map(|(read, _)| read)
+    }
+
+    pub(crate) fn read_text_record_with_termination(
+        &mut self,
+        record: &mut Vec<u8>,
+        number: usize,
+    ) -> Result<(usize, bool)> {
         let result = match &mut self.inner {
-            Inner::Vcf(reader) => read_line(reader, record),
-            Inner::VcfGz(reader) => read_line(reader, record),
+            Inner::Vcf(reader) => read_line_with_termination(reader, record),
+            Inner::VcfGz(reader) => read_line_with_termination(reader, record),
             _ => unreachable!(),
         };
         result.map_err(|error| {
@@ -133,7 +174,7 @@ fn is_bcf(reader: &mut impl BufRead, compressed: bool) -> io::Result<bool> {
     }
 }
 
-fn read_vcf_header<R>(reader: &mut R) -> io::Result<(vcf::Header, Vec<u8>)>
+fn read_vcf_header<R>(reader: &mut R) -> io::Result<Vec<u8>>
 where
     R: BufRead,
 {
@@ -145,15 +186,10 @@ where
         }
         reader.read_until(b'\n', &mut raw)?;
     }
-    let text = std::str::from_utf8(&raw)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let header = text
-        .parse()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok((header, raw))
+    Ok(raw)
 }
 
-fn read_bcf_header<R>(reader: &mut bcf::io::Reader<R>) -> io::Result<(vcf::Header, Vec<u8>)>
+fn read_bcf_header<R>(reader: &mut bcf::io::Reader<R>) -> io::Result<Vec<u8>>
 where
     R: Read,
 {
@@ -176,28 +212,23 @@ where
     let mut raw = Vec::new();
     raw_reader.read_to_end(&mut raw)?;
     raw_reader.discard_to_end()?;
-    let text = std::str::from_utf8(&raw)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let mut header: vcf::Header = text
-        .parse()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    *header.string_maps_mut() = text
-        .parse()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-
-    Ok((header, raw))
+    Ok(raw)
 }
 
-fn read_line(reader: &mut impl BufRead, record: &mut Vec<u8>) -> io::Result<usize> {
+fn read_line_with_termination(
+    reader: &mut impl BufRead,
+    record: &mut Vec<u8>,
+) -> io::Result<(usize, bool)> {
     record.clear();
     let read = reader.read_until(b'\n', record)?;
-    if record.last() == Some(&b'\n') {
+    let terminated = record.last() == Some(&b'\n');
+    if terminated {
         record.pop();
         if record.last() == Some(&b'\r') {
             record.pop();
         }
     }
-    Ok(read)
+    Ok((read, terminated))
 }
 
 fn canonical_header(raw: &[u8]) -> io::Result<Vec<u8>> {

@@ -1,7 +1,7 @@
 use std::process;
 
 use clap::{Parser, Subcommand};
-use rsomics_common::{OutputArgs, Result, ToolMeta, run as run_tool};
+use rsomics_common::{OutputArgs, Result, ToolMeta, Validation, run_validation};
 use serde::Serialize;
 
 use crate::{commands, head};
@@ -33,6 +33,9 @@ enum Command {
 
     /// Extract variant fields with a typed format string
     Query(commands::query::Arguments),
+
+    /// Validate VCF or BCF structure and typed values
+    Validate(commands::validate::Arguments),
 }
 
 #[derive(Debug, Serialize)]
@@ -40,19 +43,25 @@ enum Command {
 pub(crate) enum CommandOutput {
     Head { summary: head::Summary },
     Query { summary: crate::query::Summary },
+    Validate { report: crate::validate::Report },
 }
 
 #[must_use]
 pub(crate) fn run() -> process::ExitCode {
     let cli = rsomics_help::parse::<Cli>();
     let output = cli.output.clone();
-    run_tool(&output, META, || execute(cli))
+    run_validation(&output, META, || execute(cli))
 }
 
-fn execute(cli: Cli) -> Result<CommandOutput> {
+fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
     match cli.command {
-        Command::Head(arguments) => commands::head::execute(arguments, cli.output.json),
-        Command::Query(arguments) => commands::query::execute(arguments, cli.output.json),
+        Command::Head(arguments) => {
+            commands::head::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
+        Command::Query(arguments) => {
+            commands::query::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
+        Command::Validate(arguments) => commands::validate::execute(arguments, cli.output.json),
     }
 }
 
@@ -85,5 +94,16 @@ mod tests {
         assert!(help.contains("Fields and literals"), "{help}");
         assert!(help.contains("-f, --format <FORMAT>"), "{help}");
         assert!(help.contains("-S, --samples-file <FILE>"), "{help}");
+    }
+
+    #[test]
+    fn validate_help_uses_family_layout() {
+        let error =
+            rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "validate", "--help"])
+                .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("Input VCF or BCF file"), "{help}");
+        assert!(help.contains("--max-diagnostics <INT>"), "{help}");
+        assert!(help.contains("--require-evidence"), "{help}");
     }
 }

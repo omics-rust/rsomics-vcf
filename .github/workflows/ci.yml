@@ -79,8 +79,31 @@ jobs:
         if: matrix.target == 'linux-x86_64'
         run: test "$(bcftools --version | sed -n '1p')" = "bcftools 1.24"
 
+      - name: Fetch pinned validation corpora
+        if: matrix.target == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          hts="$RUNNER_TEMP/hts-specs"
+          git init "$hts"
+          git -C "$hts" remote add origin https://github.com/samtools/hts-specs.git
+          git -C "$hts" fetch --depth=1 origin da617203a9527537746e200abda2885bec3a822c
+          git -C "$hts" checkout --detach FETCH_HEAD
+          test "$(git -C "$hts" rev-parse HEAD)" = da617203a9527537746e200abda2885bec3a822c
+
+          validator="$RUNNER_TEMP/vcf-validator"
+          git init "$validator"
+          git -C "$validator" remote add origin https://github.com/EBIvariation/vcf-validator.git
+          git -C "$validator" fetch --depth=1 origin 0aacc4a44430ab9cee87d9925aacb28a2fb0a9fb
+          git -C "$validator" checkout --detach FETCH_HEAD
+          test "$(git -C "$validator" rev-parse HEAD)" = 0aacc4a44430ab9cee87d9925aacb28a2fb0a9fb
+
+          echo "HTS_SPECS_DIR=$hts" >> "$GITHUB_ENV"
+          echo "VCF_VALIDATOR_DIR=$validator" >> "$GITHUB_ENV"
+
       - name: Test compatibility oracle
         if: matrix.target == 'linux-x86_64'
         run: |
           cargo test --locked --test compat -- --ignored
           cargo test --locked --test query -- --ignored
+          cargo test --locked --test validate_compat -- --ignored

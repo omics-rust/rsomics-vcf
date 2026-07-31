@@ -8,6 +8,8 @@ The current implementation provides:
   VCF, BGZF-compressed VCF, BCF, or standard input.
 - `query`: project typed site, INFO, FORMAT, and genotype fields from the same
   input formats with sample selection and transactional named output.
+- `validate`: validate VCF 4.1–4.5 or BCF 2.2 structure, schema, typed values,
+  cardinality, genotypes, and cross-field invariants.
 
 `head` writes VCF text, preserves header order, normalizes the standard PASS
 definition, removes BCF-internal `IDX` fields, and renders typed records
@@ -40,6 +42,21 @@ The current query contract is a single-input field projection. Region and
 target selection, expression filtering and functions, multi-input `%MASK`,
 `%PBINOM`, `%N_PASS`, `%TBCSQ`, `%VKX`, and undefined-tag fallback are outside
 this contract.
+
+`validate` accepts plain or gzip/BGZF-compressed VCF, raw or BGZF-compressed
+BCF, and standard input. Diagnostics identify the record line and field, and
+invalid input exits with status 1. By default it retains at most 100
+diagnostics while still reporting the complete error and warning counts.
+
+```console
+rsomics-vcf validate variants.vcf.gz
+rsomics-vcf validate variants.bcf --max-diagnostics 20
+rsomics-vcf validate variants.vcf --require-evidence --json
+```
+
+`--require-evidence` additionally requires every record to carry `GT`,
+`INFO/AF`, or both `INFO/AC` and `INFO/AN`. This is an explicit policy rather
+than part of the VCF format validity contract.
 
 ## License
 
