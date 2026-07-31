@@ -30,12 +30,16 @@ struct Cli {
 enum Command {
     /// Print VCF headers and the first variant records
     Head(commands::head::Arguments),
+
+    /// Extract variant fields with a typed format string
+    Query(commands::query::Arguments),
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub(crate) enum CommandOutput {
     Head { summary: head::Summary },
+    Query { summary: crate::query::Summary },
 }
 
 #[must_use]
@@ -48,6 +52,7 @@ pub(crate) fn run() -> process::ExitCode {
 fn execute(cli: Cli) -> Result<CommandOutput> {
     match cli.command {
         Command::Head(arguments) => commands::head::execute(arguments, cli.output.json),
+        Command::Query(arguments) => commands::query::execute(arguments, cli.output.json),
     }
 }
 
@@ -70,5 +75,15 @@ mod tests {
         assert!(help.contains("Input VCF or BCF file"), "{help}");
         assert!(help.contains("-H, --headers <INT>"), "{help}");
         assert!(help.contains("-s, --samples <INT>"), "{help}");
+    }
+
+    #[test]
+    fn query_help_uses_family_layout() {
+        let error = rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "query", "--help"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("Fields and literals"), "{help}");
+        assert!(help.contains("-f, --format <FORMAT>"), "{help}");
+        assert!(help.contains("-S, --samples-file <FILE>"), "{help}");
     }
 }

@@ -2,6 +2,7 @@ use std::io::{BufWriter, Write};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rsomics_vcf::head::{self, Options};
+use rsomics_vcf::query::{self, HeaderMode};
 
 fn benchmark(c: &mut Criterion) {
     let mut input = tempfile::NamedTempFile::new().unwrap();
@@ -40,6 +41,19 @@ fn benchmark(c: &mut Criterion) {
             });
         },
     );
+    group.finish();
+
+    let mut group = c.benchmark_group("query");
+    group.throughput(Throughput::Bytes(bytes));
+    let options = query::Options {
+        format: "%CHROM\\t%POS\\t%INFO/DP\\n".to_owned(),
+        samples: None,
+        header: HeaderMode::None,
+        automatic_newline: true,
+    };
+    group.bench_function(BenchmarkId::new("vcf_projection", 100_000), |b| {
+        b.iter(|| query::write(input.path(), &options, std::io::sink()).unwrap());
+    });
     group.finish();
 }
 

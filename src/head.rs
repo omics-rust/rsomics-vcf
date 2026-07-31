@@ -6,7 +6,7 @@ use noodles_vcf::{self as vcf, variant::io::Write as _};
 use rsomics_common::{Result, RsomicsError};
 use serde::Serialize;
 
-use crate::format::{HeaderTypes, Reader, reformat_record};
+use crate::format::{HeaderTypes, Reader, reformat_record, trim_line_ending};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Options {
@@ -37,7 +37,14 @@ pub fn write(input: &Path, options: Options, mut output: impl Write) -> Result<S
     } else if reader.is_text() {
         write_text_records(&mut reader, &types, options.records, input, &mut output)?
     } else {
-        write_bcf_records(&mut reader, &header, options.records, input, &mut output)?
+        write_bcf_records(
+            &mut reader,
+            &header,
+            &types,
+            options.records,
+            input,
+            &mut output,
+        )?
     };
 
     output.flush().map_err(RsomicsError::Io)?;
@@ -78,19 +85,22 @@ fn write_text_records(
 fn write_bcf_records(
     reader: &mut Reader,
     header: &vcf::Header,
+    types: &HeaderTypes,
     limit: usize,
     input: &Path,
     output: &mut impl Write,
 ) -> Result<usize> {
     let mut record = bcf::Record::default();
-    let mut writer = vcf::io::Writer::new(output);
+    let mut raw = Vec::with_capacity(4096);
+    let mut rendered = Vec::with_capacity(4096);
     let mut records = 0;
     while records < limit {
         let number = records + 1;
         if reader.read_bcf_record(&mut record, number)? == 0 {
             break;
         }
-        writer
+        raw.clear();
+        vcf::io::Writer::new(&mut raw)
             .write_variant_record(header, &record)
             .map_err(|error| {
                 RsomicsError::InvalidInput(format!(
@@ -99,6 +109,15 @@ fn write_bcf_records(
                     error_chain(&error)
                 ))
             })?;
+        trim_line_ending(&mut raw);
+        reformat_record(&raw, types, &mut rendered).map_err(|error| {
+            RsomicsError::InvalidInput(format!(
+                "{}: parsing variant record {number}: {error}",
+                input.display()
+            ))
+        })?;
+        output.write_all(&rendered).map_err(RsomicsError::Io)?;
+        output.write_all(b"\n").map_err(RsomicsError::Io)?;
         records += 1;
     }
     Ok(records)

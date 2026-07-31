@@ -1,0 +1,14 @@
+##fileformat=VCFv4.3
+##contig=<ID=chr1,length=1000000>
+##FILTER=<ID=q10,Description="Quality below 10">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Depth">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency">
+##INFO=<ID=DB,Number=0,Type=Flag,Description="Database membership">
+##INFO=<ID=ANN,Number=.,Type=String,Description="Annotations">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Depth">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allele depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1	S2	S3
+chr1	100	rs1	A	G	50.5	PASS	DP=30;AF=0.25;DB;ANN=missense	GT:DP:AD	0/1:20:12,8	1|1:10:0,10	./.:.:.
+chr1	200	.	C	T,TA	.	q10	DP=14;AF=0.1,0.02;ANN=synonymous,splice	GT:DP:AD	0|0:14:10,3,1	./.:.:.	1/2:8:0,5,3
+chr1	300	rs3	G	A,C	9	PASS	DP=150;AF=0.33333334,.;DB	GT:DP:AD	1/1:100:0,100,.	0/1:50:25,25,.	0/2:40:20,.,20

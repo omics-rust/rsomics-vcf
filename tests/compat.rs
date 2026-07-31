@@ -7,6 +7,10 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/head.vcf")
 }
 
+fn query_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/query.vcf")
+}
+
 fn run(mut command: Command) -> Output {
     let output = command.output().unwrap();
     assert!(
@@ -109,4 +113,24 @@ fn head_stdin_matches_bcftools_1_24() {
     assert!(oracle_output.status.success());
 
     assert_eq!(our_output.stdout, oracle_output.stdout);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn head_canonicalizes_bcf_numeric_values() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let bcf = directory.path().join("query.bcf");
+    let input = query_fixture();
+    bcftools(&[
+        "view",
+        "--no-version",
+        "-Ob",
+        "-o",
+        bcf.to_str().unwrap(),
+        input.to_str().unwrap(),
+    ]);
+
+    let arguments = ["head", "-n", "3", bcf.to_str().unwrap()];
+    assert_eq!(ours(&arguments).stdout, bcftools(&arguments).stdout);
 }

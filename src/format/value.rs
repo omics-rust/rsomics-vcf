@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ValueType {
+pub(crate) enum ValueType {
     Integer,
     Float,
     Flag,
@@ -8,7 +8,7 @@ pub(super) enum ValueType {
 }
 
 impl ValueType {
-    pub(super) fn parse(value: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(value: &[u8]) -> Option<Self> {
         Some(match value {
             b"Integer" => Self::Integer,
             b"Float" => Self::Float,
@@ -20,7 +20,7 @@ impl ValueType {
     }
 }
 
-pub(super) fn reformat_into(output: &mut Vec<u8>, raw: &[u8], value_type: ValueType) {
+pub(crate) fn reformat_into(output: &mut Vec<u8>, raw: &[u8], value_type: ValueType) {
     match value_type {
         ValueType::String | ValueType::Character | ValueType::Flag => {
             output.extend_from_slice(raw);
@@ -28,6 +28,10 @@ pub(super) fn reformat_into(output: &mut Vec<u8>, raw: &[u8], value_type: ValueT
         ValueType::Integer => each_element(output, raw, write_integer),
         ValueType::Float => each_element(output, raw, write_float),
     }
+}
+
+pub(crate) fn write_f32(output: &mut Vec<u8>, value: f32) {
+    write_g6(output, f64::from(value));
 }
 
 fn each_element(output: &mut Vec<u8>, raw: &[u8], render: fn(&mut Vec<u8>, &[u8])) {

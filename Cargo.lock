@@ -542,13 +542,14 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rsomics-common"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2f9dd66f602bc9b61b53157652afb7e954b5658f2cfa545496cc2a16d8fff4a"
+checksum = "23e3b9e035a7a3c7988f68315e012dca5c0d79ba2a66683ffe6cabe13a023de7"
 dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
@@ -574,6 +575,7 @@ dependencies = [
  "rsomics-common",
  "rsomics-help",
  "serde",
+ "serde_json",
  "tempfile",
 ]
 

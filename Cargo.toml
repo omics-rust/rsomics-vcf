@@ -19,12 +19,13 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 noodles-bcf = "0.86"
 noodles-bgzf = "0.47"
 noodles-vcf = "0.88"
-rsomics-common = "0.7"
+rsomics-common = "0.8"
 rsomics-help = "0.4"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+serde_json = "1"
 tempfile = "3"
 
 [[bin]]

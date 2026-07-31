@@ -22,7 +22,7 @@ impl TypeMap {
 pub(crate) struct HeaderTypes {
     info: TypeMap,
     format: TypeMap,
-    samples: usize,
+    samples: Vec<Vec<u8>>,
 }
 
 impl HeaderTypes {
@@ -63,7 +63,7 @@ impl HeaderTypes {
                         "#CHROM sample columns require FORMAT and at least one sample",
                     ));
                 }
-                types.samples = columns.len().saturating_sub(9);
+                types.samples = columns.into_iter().skip(9).map(<[u8]>::to_vec).collect();
                 chrom = true;
             }
         }
@@ -76,16 +76,20 @@ impl HeaderTypes {
         Ok(types)
     }
 
-    pub(super) fn info(&self, id: &[u8]) -> Option<ValueType> {
+    pub(crate) fn info(&self, id: &[u8]) -> Option<ValueType> {
         self.info.get(id)
     }
 
-    pub(super) fn format(&self, id: &[u8]) -> Option<ValueType> {
+    pub(crate) fn format(&self, id: &[u8]) -> Option<ValueType> {
         self.format.get(id)
     }
 
-    pub(super) fn samples(&self) -> usize {
-        self.samples
+    pub(crate) fn samples(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub(crate) fn sample_name(&self, index: usize) -> Option<&[u8]> {
+        self.samples.get(index).map(Vec::as_slice)
     }
 }
 
