@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - target: macos-x86_64
+            runner: macos-15-intel
+          - target: macos-aarch64
+            runner: macos-15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust 1.91
+        uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Format
+        if: matrix.target == 'linux-x86_64'
+        run: cargo fmt --all -- --check
+
+      - name: Strict Clippy
+        if: matrix.target == 'linux-x86_64'
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test debug
+        run: cargo test --locked --all-features
+
+      - name: Test release
+        run: cargo test --release --locked --all-features
+
+      - name: Verify package
+        if: matrix.target == 'linux-x86_64'
+        run: cargo package --locked
+
+      - name: Install bcftools oracle dependencies
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbz2-dev libcurl4-openssl-dev liblzma-dev libssl-dev zlib1g-dev
+
+      - name: Build bcftools 1.24 oracle
+        if: matrix.target == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/bcftools-1.24.tar.bz2"
+          curl --fail --location --retry 3 \
+            https://github.com/samtools/bcftools/releases/download/1.24/bcftools-1.24.tar.bz2 \
+            --output "$archive"
+          echo "8caddc22610ee2851666047c859bb91da0c1e32d0c2ec553db6f153ad130e46f  $archive" \
+            | shasum -a 256 --check
+          tar -xjf "$archive" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/bcftools-1.24"
+          ./configure --without-curses
+          make -j2
+          echo "$RUNNER_TEMP/bcftools-1.24" >> "$GITHUB_PATH"
+
+      - name: Verify bcftools oracle
+        if: matrix.target == 'linux-x86_64'
+        run: test "$(bcftools --version | sed -n '1p')" = "bcftools 1.24"
+
+      - name: Test compatibility oracle
+        if: matrix.target == 'linux-x86_64'
+        run: cargo test --locked --test compat -- --ignored

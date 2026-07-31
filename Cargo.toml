@@ -1,0 +1,36 @@
+[package]
+name = "rsomics-vcf"
+version = "0.1.0"
+description = "VCF and BCF inspection, transformation, filtering, indexing, and statistics"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/omics-rust/rsomics-vcf"
+homepage = "https://github.com/omics-rust/rsomics-vcf"
+documentation = "https://docs.rs/rsomics-vcf"
+readme = "README.md"
+authors = ["Zane Leong <efd@live.com>"]
+categories = ["science", "command-line-utilities"]
+keywords = ["vcf", "bcf", "bioinformatics", "variants", "genomics"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+noodles-bcf = "0.86"
+noodles-bgzf = "0.47"
+noodles-vcf = "0.88"
+rsomics-common = "0.7"
+rsomics-help = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3"
+
+[[bin]]
+name = "rsomics-vcf"
+path = "src/main.rs"
+
+[[bench]]
+name = "head"
+harness = false
