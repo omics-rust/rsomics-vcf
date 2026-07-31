@@ -39,6 +39,9 @@ enum Command {
 
     /// Validate VCF or BCF structure and typed values
     Validate(commands::validate::Arguments),
+
+    /// Convert, subset, and select VCF or BCF records
+    View(commands::view::Arguments),
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +51,7 @@ pub(crate) enum CommandOutput {
     Index { outcome: crate::index::Outcome },
     Query { summary: crate::query::Summary },
     Validate { report: crate::validate::Report },
+    View { summary: crate::view::Summary },
 }
 
 #[must_use]
@@ -69,6 +73,9 @@ fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
             commands::query::execute(arguments, cli.output.json).map(Validation::Valid)
         }
         Command::Validate(arguments) => commands::validate::execute(arguments, cli.output.json),
+        Command::View(arguments) => {
+            commands::view::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
     }
 }
 
@@ -126,5 +133,16 @@ mod tests {
         assert!(help.contains("Input VCF or BCF file"), "{help}");
         assert!(help.contains("--max-diagnostics <INT>"), "{help}");
         assert!(help.contains("--require-evidence"), "{help}");
+    }
+
+    #[test]
+    fn view_help_uses_family_layout() {
+        let error = rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "view", "--help"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("Input VCF or BCF file"), "{help}");
+        assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
+        assert!(help.contains("-s, --samples <LIST>"), "{help}");
+        assert!(help.contains("-r, --regions <REGIONS>"), "{help}");
     }
 }

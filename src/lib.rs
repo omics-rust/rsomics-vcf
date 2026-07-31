@@ -4,6 +4,7 @@ pub mod head;
 pub mod index;
 pub mod query;
 pub mod validate;
+pub mod view;
 
 mod cli;
 mod commands;

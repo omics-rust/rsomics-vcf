@@ -1,4 +1,4 @@
-const REF: u32 = 0;
+const REF: u32 = 1 << 6;
 const SNP: u32 = 1 << 0;
 const MNP: u32 = 1 << 1;
 const INDEL: u32 = 1 << 2;
@@ -7,10 +7,7 @@ const BND: u32 = 1 << 4;
 const OVERLAP: u32 = 1 << 5;
 
 pub(crate) fn write(output: &mut Vec<u8>, reference: &[u8], alternates: &[u8]) {
-    let mut mask = REF;
-    for alternate in alternates.split(|value| *value == b',') {
-        mask |= classify(reference, alternate);
-    }
+    let mask = mask(reference, alternates);
 
     let mut fields = 0;
     for (bit, name) in [
@@ -32,6 +29,35 @@ pub(crate) fn write(output: &mut Vec<u8>, reference: &[u8], alternates: &[u8]) {
     if fields == 0 {
         output.extend_from_slice(b"REF");
     }
+}
+
+pub(crate) fn mask(reference: &[u8], alternates: &[u8]) -> u32 {
+    if alternates.is_empty() {
+        return REF;
+    }
+    alternates
+        .split(|value| *value == b',')
+        .fold(0, |mask, alternate| mask | classify(reference, alternate))
+}
+
+pub(crate) fn parse_mask(values: &str) -> Result<u32, String> {
+    let mut mask = 0;
+    for value in values.split(',') {
+        mask |= match value.to_ascii_lowercase().as_str() {
+            "snps" | "snp" => SNP,
+            "indels" | "indel" => INDEL,
+            "mnps" | "mnp" => MNP,
+            "ref" => REF,
+            "bnd" => BND,
+            "other" => OTHER,
+            "overlap" => OVERLAP,
+            _ => return Err(format!("unknown variant type: {value}")),
+        };
+    }
+    if mask == 0 {
+        return Err("variant type list is empty".to_owned());
+    }
+    Ok(mask)
 }
 
 fn classify(reference: &[u8], alternate: &[u8]) -> u32 {

@@ -12,6 +12,8 @@ The current implementation provides:
   input formats with sample selection and transactional named output.
 - `validate`: validate VCF 4.1–4.5 or BCF 2.2 structure, schema, typed values,
   cardinality, genotypes, and cross-field invariants.
+- `view`: convert among VCF, BGZF VCF, raw BCF, and BGZF BCF while selecting
+  records, samples, indexed regions, or streaming targets.
 
 `head` writes VCF text, preserves header order, normalizes the standard PASS
 definition, removes BCF-internal `IDX` fields, and renders typed records
@@ -59,6 +61,24 @@ The current query contract is a single-input field projection. Region and
 target selection, expression filtering and functions, multi-input `%MASK`,
 `%PBINOM`, `%N_PASS`, `%TBCSQ`, `%VKX`, and undefined-tag fallback are outside
 this contract.
+
+`view` preserves typed records across all four encodings. It supports ordered
+sample inclusion and exclusion, optional genotype removal, AC/AN recalculation,
+FILTER, ID, allele-count, and current bcftools variant-type selection. Targets
+stream through any supported input; regions require a CSI or TBI and use
+position, record, or variant overlap semantics.
+
+```console
+rsomics-vcf view variants.bcf -O z -o variants.vcf.gz
+rsomics-vcf view variants.vcf.gz -s tumor,normal -r chr1:1-100000
+rsomics-vcf view variants.bcf -v snps,indels -f PASS -G
+```
+
+Named output is transactional, and JSON summaries require it so variant data
+never shares standard output with the envelope. Expression filtering, allele
+trimming and remapping, frequency/genotype predicates, output indexing, and
+compression workers are outside this first stable `view` contract; they are
+not accepted as partially implemented flags.
 
 `validate` accepts plain or gzip/BGZF-compressed VCF, raw or BGZF-compressed
 BCF, and standard input. Diagnostics identify the record line and field, and

@@ -492,6 +492,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "noodles-util"
+version = "0.82.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "567c9ce0176a2c82097de4ea27c4da7395de0447f8df0369d6dfd99c9afdc788"
+dependencies = [
+ "bstr",
+ "flate2",
+ "noodles-bcf",
+ "noodles-bgzf",
+ "noodles-core",
+ "noodles-csi",
+ "noodles-vcf",
+]
+
+[[package]]
 name = "noodles-vcf"
 version = "0.90.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -656,6 +671,7 @@ dependencies = [
  "noodles-core",
  "noodles-csi",
  "noodles-tabix",
+ "noodles-util",
  "noodles-vcf",
  "rayon",
  "rsomics-common",
