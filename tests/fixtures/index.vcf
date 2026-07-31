@@ -1,0 +1,27 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=248956422>
+##contig=<ID=chr2,length=242193529>
+##contig=<ID=chr3,length=198295559>
+##ALT=<ID=DEL,Description="Deletion">
+##ALT=<ID=DUP,Description="Duplication">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position of the variant">
+##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE1
+chr1	10000	snv1	A	T	50	PASS	DP=30	GT	0/1
+chr1	20000	del1	N	<DEL>	60	PASS	SVTYPE=DEL;END=80000;SVLEN=-60000	GT	0/1
+chr1	30000	snv2	G	C	61	PASS	DP=31	GT	0/1
+chr1	50000	snv3	T	A	62	PASS	DP=32	GT	1/1
+chr1	70000	snv4	C	G	63	PASS	DP=33	GT	0/1
+chr1	100000	dup1	N	<DUP>	64	PASS	SVTYPE=DUP;END=200000;SVLEN=100000	GT	0/1
+chr1	120000	snv5	A	C	65	PASS	DP=34	GT	0/1
+chr1	160000	snv6	G	A	66	PASS	DP=35	GT	0/1
+chr1	210000	snv7	T	C	67	PASS	DP=36	GT	0/1
+chr2	5000	snv8	G	A	55	PASS	DP=37	GT	0/1
+chr2	15000	del2	N	<DEL>	56	PASS	SVTYPE=DEL;END=120000;SVLEN=-105000	GT	0/1
+chr2	40000	snv9	T	C	57	PASS	DP=38	GT	0/1
+chr2	90000	snv10	C	T	58	PASS	DP=39	GT	1/1
+chr2	150000	snv11	A	G	59	PASS	DP=40	GT	0/1

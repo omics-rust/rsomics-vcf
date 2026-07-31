@@ -15,10 +15,15 @@ keywords = ["vcf", "bcf", "bioinformatics", "variants", "genomics"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+bstr = "1"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 noodles-bcf = "0.88"
 noodles-bgzf = "0.49"
+noodles-core = "0.20"
+noodles-csi = "0.58"
+noodles-tabix = "0.64"
 noodles-vcf = "0.90"
+rayon = "1"
 rsomics-common = "0.9"
 rsomics-help = "0.4"
 serde = { version = "1", features = ["derive"] }

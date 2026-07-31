@@ -6,6 +6,8 @@ The current implementation provides:
 
 - `head`: stream ordered VCF headers and an optional record prefix from plain
   VCF, BGZF-compressed VCF, BCF, or standard input.
+- `index`: create and inspect CSI indexes for BGZF VCF or BCF and TBI indexes
+  for BGZF VCF.
 - `query`: project typed site, INFO, FORMAT, and genotype fields from the same
   input formats with sample selection and transactional named output.
 - `validate`: validate VCF 4.1–4.5 or BCF 2.2 structure, schema, typed values,
@@ -25,6 +27,21 @@ rsomics-vcf head -s 3 < variants.bcf
 `-H` limits metadata header lines while retaining `-h` for the unified rsomics
 help experience. `-s` starts output at `#CHROM` and then emits the requested
 number of records.
+
+`index` creates CSI by default, supports custom CSI minimum shifts and BGZF
+decompression workers, and writes the completed index transactionally. It
+rejects ordinary gzip, missing BGZF terminators, unsorted coordinates,
+noncontiguous contig blocks, malformed records, and implicit replacement.
+`--stats` and `--nrecords` read count metadata from a variant path or directly
+from an existing index.
+
+```console
+rsomics-vcf index variants.vcf.gz
+rsomics-vcf index --tbi variants.vcf.gz
+rsomics-vcf index --min-shift 18 variants.bcf
+rsomics-vcf index --stats variants.vcf.gz
+rsomics-vcf index --nrecords variants.bcf.csi
+```
 
 `query` supports fixed columns, `%POS0`, `%END`, `%END0`, `%FIRST_ALT`,
 `%TYPE`, `%INFO`, `%INFO/TAG`, `%FORMAT`, `%LINE`, array subscripts, and

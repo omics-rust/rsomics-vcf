@@ -1,3 +1,4 @@
 pub(crate) mod head;
+pub(crate) mod index;
 pub(crate) mod query;
 pub(crate) mod validate;

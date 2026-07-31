@@ -126,6 +126,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
 dependencies = [
  "memchr",
+ "regex-automata",
  "serde_core",
 ]
 
@@ -646,12 +647,17 @@ dependencies = [
 name = "rsomics-vcf"
 version = "0.1.0"
 dependencies = [
+ "bstr",
  "clap",
  "criterion",
  "flate2",
  "noodles-bcf",
  "noodles-bgzf",
+ "noodles-core",
+ "noodles-csi",
+ "noodles-tabix",
  "noodles-vcf",
+ "rayon",
  "rsomics-common",
  "rsomics-help",
  "serde",

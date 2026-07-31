@@ -31,6 +31,9 @@ enum Command {
     /// Print VCF headers and the first variant records
     Head(commands::head::Arguments),
 
+    /// Create or inspect random-access indexes
+    Index(commands::index::Arguments),
+
     /// Extract variant fields with a typed format string
     Query(commands::query::Arguments),
 
@@ -42,6 +45,7 @@ enum Command {
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub(crate) enum CommandOutput {
     Head { summary: head::Summary },
+    Index { outcome: crate::index::Outcome },
     Query { summary: crate::query::Summary },
     Validate { report: crate::validate::Report },
 }
@@ -57,6 +61,9 @@ fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
     match cli.command {
         Command::Head(arguments) => {
             commands::head::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
+        Command::Index(arguments) => {
+            commands::index::execute(arguments, cli.output.json).map(Validation::Valid)
         }
         Command::Query(arguments) => {
             commands::query::execute(arguments, cli.output.json).map(Validation::Valid)
@@ -94,6 +101,20 @@ mod tests {
         assert!(help.contains("Fields and literals"), "{help}");
         assert!(help.contains("-f, --format <FORMAT>"), "{help}");
         assert!(help.contains("-S, --samples-file <FILE>"), "{help}");
+    }
+
+    #[test]
+    fn index_help_uses_family_layout() {
+        let error = rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "index", "--help"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(
+            help.contains("Input BGZF-compressed VCF or BCF file"),
+            "{help}"
+        );
+        assert!(help.contains("-m, --min-shift <INT>"), "{help}");
+        assert!(help.contains("-s, --stats"), "{help}");
+        assert!(help.contains("-n, --nrecords"), "{help}");
     }
 
     #[test]

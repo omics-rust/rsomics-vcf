@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 pub mod head;
+pub mod index;
 pub mod query;
 pub mod validate;
 

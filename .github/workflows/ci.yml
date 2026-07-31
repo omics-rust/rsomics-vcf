@@ -105,5 +105,6 @@ jobs:
         if: matrix.target == 'linux-x86_64'
         run: |
           cargo test --locked --test compat -- --ignored
+          cargo test --locked --test index_compat -- --ignored
           cargo test --locked --test query -- --ignored
           cargo test --locked --test validate_compat -- --ignored
