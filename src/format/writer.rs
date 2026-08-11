@@ -7,7 +7,7 @@ use rsomics_common::{Result, RsomicsError};
 
 use super::{HeaderMode, OutputFormat};
 
-pub(super) enum Writer<W>
+pub(crate) enum Writer<W>
 where
     W: Write,
 {
@@ -21,7 +21,7 @@ impl<W> Writer<W>
 where
     W: Write,
 {
-    pub(super) fn new(output: W, format: OutputFormat) -> Self {
+    pub(crate) fn new(output: W, format: OutputFormat) -> Self {
         match format {
             OutputFormat::Vcf => Self::Vcf(vcf::io::Writer::new(BufWriter::new(output))),
             OutputFormat::VcfBgzf => {
@@ -32,7 +32,7 @@ where
         }
     }
 
-    pub(super) fn write_header(&mut self, header: &vcf::Header, mode: HeaderMode) -> Result<()> {
+    pub(crate) fn write_header(&mut self, header: &vcf::Header, mode: HeaderMode) -> Result<()> {
         if mode == HeaderMode::None {
             return Ok(());
         }
@@ -45,7 +45,7 @@ where
         .map_err(|error| map_write_error(error, "writing variant header"))
     }
 
-    pub(super) fn write_record(
+    pub(crate) fn write_record(
         &mut self,
         header: &vcf::Header,
         record: &vcf::variant::RecordBuf,
@@ -60,7 +60,7 @@ where
         .map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
     }
 
-    pub(super) fn write_vcf_record(&mut self, record: &[u8], number: u64) -> Result<()> {
+    pub(crate) fn write_vcf_record(&mut self, record: &[u8], number: u64) -> Result<()> {
         let result = match self {
             Self::Vcf(writer) => writer.get_mut().write_all(record),
             Self::VcfBgzf(writer) => writer.get_mut().write_all(record),
@@ -79,7 +79,7 @@ where
         })
     }
 
-    pub(super) fn finish(&mut self) -> Result<()> {
+    pub(crate) fn finish(&mut self) -> Result<()> {
         match self {
             Self::Vcf(writer) => writer.get_mut().flush(),
             Self::VcfBgzf(writer) => writer.get_mut().try_finish(),

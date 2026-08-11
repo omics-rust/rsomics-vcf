@@ -6,7 +6,9 @@ use noodles_util::variant::io::indexed_reader;
 use noodles_vcf::variant::{RecordBuf, record::info::field::key, record_buf::info::field::Value};
 use rsomics_common::{Context, Result, RsomicsError};
 
-use super::{HeaderMode, Options, Summary, output, samples, selection};
+use crate::format::Writer;
+
+use super::{HeaderMode, Options, Summary, samples, selection};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OverlapMode {
@@ -68,7 +70,7 @@ pub(super) fn write_indexed(
     let query_regions = regions.merged(&header)?;
     let projection = samples::Projection::new(&header, options)?;
     let output_header = projection.header(&header, options);
-    let mut writer = output::Writer::new(output, options.output_format);
+    let mut writer = Writer::new(output, options.output_format);
     writer.write_header(&output_header, options.header)?;
 
     if options.header == HeaderMode::HeaderOnly {

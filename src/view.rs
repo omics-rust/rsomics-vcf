@@ -1,4 +1,3 @@
-mod output;
 mod regions;
 mod samples;
 mod selection;
@@ -11,29 +10,12 @@ use noodles_vcf::{self as vcf, variant::RecordBuf};
 use rsomics_common::{Result, RsomicsError};
 use serde::Serialize;
 
-use crate::format::{Reader, reformat_record};
+use crate::format::{Reader, Writer, reformat_record};
 
+pub use crate::format::{HeaderMode, OutputFormat};
 pub use regions::{OverlapMode, RegionSet};
 pub use samples::SampleSelection;
 pub use selection::TypeSelection;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OutputFormat {
-    #[default]
-    Vcf,
-    VcfBgzf,
-    Bcf,
-    BcfRaw,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum HeaderMode {
-    #[default]
-    Full,
-    HeaderOnly,
-    None,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdSelection {
@@ -93,7 +75,7 @@ pub fn write(input: &Path, options: &Options, output: impl Write) -> Result<Summ
     let (header, _, schema) = reader.read_header()?;
     let projection = samples::Projection::new(&header, options)?;
     let output_header = projection.header(&header, options);
-    let mut writer = output::Writer::new(output, options.output_format);
+    let mut writer = Writer::new(output, options.output_format);
     writer.write_header(&output_header, options.header)?;
 
     if options.header == HeaderMode::HeaderOnly {
