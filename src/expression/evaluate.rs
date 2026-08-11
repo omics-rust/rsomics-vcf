@@ -30,6 +30,16 @@ struct SampleTruth {
 }
 
 impl Truth {
+    pub(crate) fn site_passes(&self) -> bool {
+        self.site
+    }
+
+    pub(crate) fn sample_passes(&self) -> Option<&[bool]> {
+        self.samples
+            .as_ref()
+            .map(|samples| samples.passes.as_slice())
+    }
+
     fn site(value: bool) -> Self {
         Self {
             site: value,

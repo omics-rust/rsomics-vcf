@@ -10,6 +10,8 @@ mod cli;
 mod commands;
 #[cfg(test)]
 mod expression;
+#[cfg(test)]
+mod filter;
 mod format;
 mod query_bcf;
 mod query_format;
