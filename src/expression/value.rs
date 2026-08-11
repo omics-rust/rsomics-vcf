@@ -60,6 +60,27 @@ pub(crate) fn genotype_indices(record: &RecordBuf) -> Result<Vec<Vec<usize>>, Va
         .collect()
 }
 
+pub(crate) fn diploid_genotype_indices(
+    record: &RecordBuf,
+) -> Result<Vec<Option<[usize; 2]>>, ValueError> {
+    let sample_count = record.samples().values().count();
+    let Some(genotypes) = record.samples().select("GT") else {
+        return Ok(vec![None; sample_count]);
+    };
+    (0..sample_count)
+        .map(|index| match genotypes.get(index).flatten() {
+            Some(SampleValue::Genotype(genotype)) => {
+                let mut alleles = genotype.as_ref().iter();
+                let first = alleles.next().and_then(|allele| allele.position());
+                let second = alleles.next().and_then(|allele| allele.position());
+                Ok(first.zip(second).map(|(first, second)| [first, second]))
+            }
+            Some(_) => Err(ValueError::new("FORMAT/GT is not a genotype")),
+            None => Ok(None),
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Atom<'a> {
     Absent,

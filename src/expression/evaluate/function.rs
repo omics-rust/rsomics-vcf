@@ -2,13 +2,30 @@ use crate::expression::{
     bind::FunctionKind,
     value::{Atom, Filter, Values},
 };
+use noodles_vcf::variant::RecordBuf;
 
 use super::{EvaluateError, Evaluated};
 
+mod binomial;
+
 pub(super) fn evaluate<'a>(
     kind: FunctionKind,
-    argument: Evaluated<'a>,
+    mut arguments: Vec<Evaluated<'a>>,
+    record: &RecordBuf,
 ) -> Result<Evaluated<'a>, EvaluateError> {
+    if kind == FunctionKind::Binomial {
+        let arguments = arguments
+            .into_iter()
+            .map(super::require_values)
+            .collect::<Result<_, _>>()?;
+        return binomial::evaluate(arguments, record).map(Evaluated::Values);
+    }
+    if arguments.len() != 1 {
+        return Err(EvaluateError::new(
+            "function evaluation for this arity is not implemented",
+        ));
+    }
+    let argument = arguments.pop().expect("single function argument");
     match (kind, argument) {
         (FunctionKind::Count | FunctionKind::SampleCount, Evaluated::Values(values)) => {
             count(kind, values).map(Evaluated::Values)

@@ -222,7 +222,7 @@ fn bind_function(name: &str, argument_count: usize) -> Result<FunctionKind, Bind
         "COUNT" => (FunctionKind::Count, 1..=1),
         "SMPL_COUNT" | "SCOUNT" => (FunctionKind::SampleCount, 1..=1),
         "STRLEN" => (FunctionKind::StringLength, 1..=1),
-        "BINOM" => (FunctionKind::Binomial, 0..=2),
+        "BINOM" => (FunctionKind::Binomial, 1..=2),
         "FISHER" => (FunctionKind::Fisher, 1..=2),
         "PHRED" => (FunctionKind::Phred, 1..=1),
         "N_PASS" => (FunctionKind::PassingSampleCount, 1..=1),
@@ -646,7 +646,7 @@ mod tests {
         };
         assert_eq!(kind, FunctionKind::SampleMean);
         assert_eq!(arguments.len(), 1);
-        for source in ["unknown(AF)", "MAX()", "SUM(AF, R)", "FISHER()"] {
+        for source in ["unknown(AF)", "MAX()", "SUM(AF, R)", "BINOM()", "FISHER()"] {
             assert!(bind(parse(source).unwrap(), &header()).is_err(), "{source}");
         }
     }

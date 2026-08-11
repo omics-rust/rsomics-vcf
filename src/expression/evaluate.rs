@@ -134,13 +134,11 @@ fn evaluate_node<'a>(
             }
         }
         BoundExpression::Function { kind, arguments } => {
-            let [argument] = arguments.as_slice() else {
-                return Err(EvaluateError::new(
-                    "function evaluation for this arity is not implemented",
-                ));
-            };
-            let argument = evaluate_node(argument, header, record)?;
-            function::evaluate(*kind, argument)
+            let arguments = arguments
+                .iter()
+                .map(|argument| evaluate_node(argument, header, record))
+                .collect::<Result<_, _>>()?;
+            function::evaluate(*kind, arguments, record)
         }
     }
 }
@@ -251,8 +249,10 @@ mod tests {
 ##contig=<ID=chr1>\n\
 ##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
 ##INFO=<ID=AF,Number=A,Type=Float,Description=\"frequency\">\n\
+##INFO=<ID=B,Number=2,Type=Integer,Description=\"binomial counts\">\n\
 ##INFO=<ID=R,Number=R,Type=Integer,Description=\"allele values\">\n\
 ##INFO=<ID=M,Number=2,Type=Integer,Description=\"values with missing\">\n\
+##INFO=<ID=Z,Number=2,Type=Integer,Description=\"zero counts\">\n\
 ##INFO=<ID=X,Number=1,Type=Integer,Description=\"optional\">\n\
 ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\">\n\
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
@@ -261,7 +261,7 @@ mod tests {
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
             .parse()
             .unwrap();
-        let line = b"chr1\t7\trs1;rs2\tA\tC,G\t50\tPASS\tDP=12;AF=0.1,0.9;R=1,2,3;M=1,.\tGT:DP:AD:ST\t0/1:8:4,4,0:alpha\t1/2:.:0,3,5:BETA\t0/.:2:2,0,.:.";
+        let line = b"chr1\t7\trs1;rs2\tA\tC,G\t50\tPASS\tDP=12;AF=0.1,0.9;B=3,5;R=1,2,3;M=1,.;Z=0,0\tGT:DP:AD:ST\t0/1:8:4,4,0:alpha\t1/2:.:0,3,5:BETA\t0/.:2:2,0,.:.";
         let raw = vcf::Record::try_from(line.as_slice()).unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
         (header, record)
@@ -638,6 +638,30 @@ mod tests {
                 vec![false, true, false],
                 vec![false, true, false].into_boxed_slice()
             )
+        );
+    }
+
+    #[test]
+    fn binomial_supports_site_sample_and_explicit_count_pairs() {
+        let (header, record) = fixture();
+        for source in [
+            "BINOM(B) > 0.7 & BINOM(B) < 0.8",
+            "BINOM(B[0], B[1]) > 0.7",
+            "BINOM(Z) = '.'",
+        ] {
+            assert_eq!(
+                truth(source, &header, &record),
+                Truth::site(true),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            truth("BINOM(FMT/AD) > 0.7", &header, &record),
+            Truth::samples(vec![true, true, false])
+        );
+        assert_eq!(
+            truth("BINOM(FMT/AD[:0], FMT/AD[:1]) > 0.2", &header, &record),
+            Truth::samples(vec![true, true, true])
         );
     }
 
