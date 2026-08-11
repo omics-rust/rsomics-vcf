@@ -1,6 +1,7 @@
 use std::fmt;
 
 use noodles_vcf::{self as vcf, variant::RecordBuf};
+use regex::{Regex, RegexBuilder};
 
 use super::{
     bind::{BoundExpression, BoundValue},
@@ -397,6 +398,9 @@ fn compare(
     right: Values<'_>,
     operator: BinaryOperator,
 ) -> Result<Truth, EvaluateError> {
+    if matches!(operator, BinaryOperator::Regex | BinaryOperator::NotRegex) {
+        return compare_regex(left, right, operator);
+    }
     match (left, right) {
         (Values::Site(left), Values::Site(right)) => {
             compare_cross(&left, &right, operator).map(Truth::site)
@@ -433,6 +437,67 @@ fn compare(
             .collect::<Result<_, _>>()
             .map(Truth::samples),
     }
+}
+
+fn compare_regex(
+    values: Values<'_>,
+    pattern: Values<'_>,
+    operator: BinaryOperator,
+) -> Result<Truth, EvaluateError> {
+    let Values::Site(pattern) = pattern else {
+        return Err(EvaluateError::new("regex pattern must be a site value"));
+    };
+    if pattern.len() != 1 {
+        return Err(EvaluateError::new(format!(
+            "regex pattern must be scalar, found {} values",
+            pattern.len()
+        )));
+    }
+    let pattern = match &pattern[0] {
+        Atom::Text(value) => *value,
+        Atom::OwnedText(value) => value,
+        Atom::Missing => ".",
+        _ => return Err(EvaluateError::new("regex pattern must be a string")),
+    };
+    let (pattern, case_insensitive) = pattern
+        .strip_suffix("/i")
+        .map(|pattern| (pattern, true))
+        .unwrap_or((pattern, false));
+    let regex = RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map_err(|error| EvaluateError::new(format!("invalid regex: {error}")))?;
+    let negate = operator == BinaryOperator::NotRegex;
+    match values {
+        Values::Site(values) => regex_values(&values, &regex, negate).map(Truth::site),
+        Values::Samples(samples) => samples
+            .iter()
+            .map(|values| regex_values(values, &regex, negate))
+            .collect::<Result<_, _>>()
+            .map(Truth::samples),
+    }
+}
+
+fn regex_values(values: &[Atom<'_>], regex: &Regex, negate: bool) -> Result<bool, EvaluateError> {
+    for value in values {
+        let passes = match value {
+            Atom::Missing => regex.is_match(".") != negate,
+            Atom::Text(value) => regex.is_match(value) != negate,
+            Atom::OwnedText(value) => regex.is_match(value) != negate,
+            Atom::Filter(filter) => match filter {
+                value::Filter::Pass => regex.is_match("PASS") != negate,
+                value::Filter::Missing => regex.is_match(".") != negate,
+                value::Filter::Failed(filters) => {
+                    filters.iter().any(|value| regex.is_match(value) != negate)
+                }
+            },
+            _ => return Err(EvaluateError::new("regex operand must be a string")),
+        };
+        if passes {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn compare_cross(
@@ -585,6 +650,8 @@ impl OperatorKind for BinaryOperator {
                 | Self::LessEqual
                 | Self::Greater
                 | Self::GreaterEqual
+                | Self::Regex
+                | Self::NotRegex
         )
     }
 
@@ -613,10 +680,11 @@ mod tests {
 ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\">\n\
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
 ##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"allele depth\">\n\
+##FORMAT=<ID=ST,Number=1,Type=String,Description=\"status\">\n\
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
             .parse()
             .unwrap();
-        let line = b"chr1\t7\trs1;rs2\tA\tC,G\t50\tPASS\tDP=12;AF=0.1,0.9;R=1,2,3\tGT:DP:AD\t0/1:8:4,4,0\t1/2:.:0,3,5\t0/.:2:2,0,.";
+        let line = b"chr1\t7\trs1;rs2\tA\tC,G\t50\tPASS\tDP=12;AF=0.1,0.9;R=1,2,3\tGT:DP:AD:ST\t0/1:8:4,4,0:alpha\t1/2:.:0,3,5:BETA\t0/.:2:2,0,.:.";
         let raw = vcf::Record::try_from(line.as_slice()).unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
         (header, record)
@@ -737,5 +805,32 @@ mod tests {
             truth("QUAL < 40 || FMT/DP >= 8", &header, &record),
             Truth::samples(vec![true, false, false])
         );
+    }
+
+    #[test]
+    fn regex_comparisons_support_vectors_samples_and_case_suffixes() {
+        let (header, record) = fixture();
+        assert_eq!(
+            truth("ID ~ '^RS[12]$/i'", &header, &record),
+            Truth::site(true)
+        );
+        assert_eq!(
+            truth("ID ~ '^RS3$/i'", &header, &record),
+            Truth::site(false)
+        );
+        assert_eq!(truth("ID !~ '^rs1$'", &header, &record), Truth::site(true));
+        assert_eq!(
+            truth("FMT/ST ~ '^beta$/i'", &header, &record),
+            Truth::samples(vec![false, true, false])
+        );
+    }
+
+    #[test]
+    fn invalid_or_non_string_regexes_fail() {
+        let (header, record) = fixture();
+        for source in ["ID ~ '['", "INFO/DP ~ '1'"] {
+            let expression = bind(parse(source).unwrap(), &header).unwrap();
+            assert!(evaluate(&expression, &header, &record).is_err(), "{source}");
+        }
     }
 }

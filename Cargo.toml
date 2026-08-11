@@ -25,6 +25,7 @@ noodles-tabix = "0.64"
 noodles-util = { version = "0.82", features = ["variant"] }
 noodles-vcf = "0.90"
 rayon = "1"
+regex = "1"
 rsomics-common = "0.9"
 rsomics-help = "0.4"
 serde = { version = "1", features = ["derive"] }

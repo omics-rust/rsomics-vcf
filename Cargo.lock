@@ -674,6 +674,7 @@ dependencies = [
  "noodles-util",
  "noodles-vcf",
  "rayon",
+ "regex",
  "rsomics-common",
  "rsomics-help",
  "serde",
