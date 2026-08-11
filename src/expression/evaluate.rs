@@ -616,6 +616,32 @@ mod tests {
     }
 
     #[test]
+    fn phred_maps_numeric_values_and_preserves_shape() {
+        let (header, record) = fixture();
+        for source in ["PHRED(0.01) = 20", "PHRED(AF[0]) = 10", "PHRED(X) = '.'"] {
+            assert_eq!(
+                truth(source, &header, &record),
+                Truth::site(true),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            truth("PHRED(FMT/DP[0]) < -9", &header, &record),
+            Truth::selected_samples(
+                vec![true, false, false],
+                vec![true, false, false].into_boxed_slice()
+            )
+        );
+        assert_eq!(
+            truth("PHRED(FMT/DP[1]) = '.'", &header, &record),
+            Truth::selected_samples(
+                vec![false, true, false],
+                vec![false, true, false].into_boxed_slice()
+            )
+        );
+    }
+
+    #[test]
     fn count_functions_distinguish_site_slots_sample_values_and_absence() {
         let (header, record) = fixture();
         for source in [

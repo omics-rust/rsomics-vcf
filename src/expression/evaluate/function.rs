@@ -79,6 +79,7 @@ pub(super) fn apply_values<'a>(
 ) -> Result<Values<'a>, EvaluateError> {
     match kind {
         FunctionKind::Absolute => return map_values(values, absolute),
+        FunctionKind::Phred => return map_values(values, phred),
         FunctionKind::StringLength => return map_values(values, string_length),
         _ => {}
     }
@@ -179,6 +180,16 @@ fn absolute(atom: &Atom<'_>) -> Result<Atom<'static>, EvaluateError> {
         Atom::Number(value) => Ok(Atom::Number(value.abs())),
         Atom::Flag => Ok(Atom::Number(1.0)),
         _ => Err(EvaluateError::new("ABS received a nonnumeric value")),
+    }
+}
+
+fn phred(atom: &Atom<'_>) -> Result<Atom<'static>, EvaluateError> {
+    match atom {
+        Atom::Absent => Ok(Atom::Absent),
+        Atom::Missing => Ok(Atom::Missing),
+        Atom::Number(value) => Ok(Atom::Number(-4.342_944_819_03 * value.ln())),
+        Atom::Flag => Ok(Atom::Number(-0.0)),
+        _ => Err(EvaluateError::new("PHRED received a nonnumeric value")),
     }
 }
 
