@@ -121,7 +121,7 @@ fn evaluate_node<'a>(
                 ));
             };
             let argument = require_values(evaluate_node(argument, header, record)?)?;
-            function::reduce(*kind, argument).map(Evaluated::Values)
+            function::apply(*kind, argument).map(Evaluated::Values)
         }
     }
 }
@@ -525,6 +525,32 @@ mod tests {
         assert_eq!(
             truth("SMPL_SUM(FMT/DP) = '.'", &header, &record),
             Truth::samples(vec![false, true, false])
+        );
+    }
+
+    #[test]
+    fn elementwise_functions_preserve_vectors_samples_and_missing_values() {
+        let (header, record) = fixture();
+        assert_eq!(
+            truth("ABS(-AF[0]) = 0.1", &header, &record),
+            Truth::site(true)
+        );
+        assert_eq!(
+            truth("ABS(FMT/DP - 10) = 2", &header, &record),
+            Truth::samples(vec![true, false, false])
+        );
+        assert_eq!(truth("ABS(X) = '.'", &header, &record), Truth::site(true));
+        assert_eq!(
+            truth("STRLEN(CHROM) = 4", &header, &record),
+            Truth::site(true)
+        );
+        assert_eq!(
+            truth("STRLEN('abc') = 3", &header, &record),
+            Truth::site(true)
+        );
+        assert_eq!(
+            truth("STRLEN('.') = 0", &header, &record),
+            Truth::site(true)
         );
     }
 }

@@ -1,14 +1,19 @@
 use crate::expression::{
     bind::FunctionKind,
-    value::{Atom, Values},
+    value::{Atom, Filter, Values},
 };
 
 use super::EvaluateError;
 
-pub(super) fn reduce<'a>(
+pub(super) fn apply<'a>(
     kind: FunctionKind,
     values: Values<'a>,
 ) -> Result<Values<'a>, EvaluateError> {
+    match kind {
+        FunctionKind::Absolute => return map_values(values, absolute),
+        FunctionKind::StringLength => return map_values(values, string_length),
+        _ => {}
+    }
     if is_sample_reduction(kind)
         && let Values::Samples(mut samples) = values
     {
@@ -34,6 +39,52 @@ pub(super) fn reduce<'a>(
         )?,
     };
     Ok(Values::Site(vec![value]))
+}
+
+fn map_values<'a>(
+    values: Values<'a>,
+    operation: fn(&Atom<'_>) -> Result<Atom<'static>, EvaluateError>,
+) -> Result<Values<'a>, EvaluateError> {
+    match values {
+        Values::Site(values) => values
+            .iter()
+            .map(operation)
+            .collect::<Result<_, _>>()
+            .map(Values::Site),
+        Values::Samples(mut samples) => {
+            samples.values = samples
+                .values
+                .iter()
+                .map(|values| values.iter().map(operation).collect::<Result<_, _>>())
+                .collect::<Result<_, _>>()?;
+            Ok(Values::Samples(samples))
+        }
+    }
+}
+
+fn absolute(atom: &Atom<'_>) -> Result<Atom<'static>, EvaluateError> {
+    match atom {
+        Atom::Missing => Ok(Atom::Missing),
+        Atom::Number(value) => Ok(Atom::Number(value.abs())),
+        Atom::Flag => Ok(Atom::Number(1.0)),
+        _ => Err(EvaluateError::new("ABS received a nonnumeric value")),
+    }
+}
+
+fn string_length(atom: &Atom<'_>) -> Result<Atom<'static>, EvaluateError> {
+    let length = match atom {
+        Atom::Missing => 0,
+        Atom::Text(value) => value.len(),
+        Atom::OwnedText(value) => value.len(),
+        Atom::Filter(Filter::Pass) => 4,
+        Atom::Filter(Filter::Missing) => 0,
+        Atom::Filter(Filter::Failed(filters)) => {
+            filters.iter().map(|filter| filter.len()).sum::<usize>()
+                + filters.len().saturating_sub(1)
+        }
+        _ => return Err(EvaluateError::new("STRLEN received a nonstring value")),
+    };
+    Ok(Atom::Number(length as f64))
 }
 
 fn reduce_atoms<'a, 'v>(
