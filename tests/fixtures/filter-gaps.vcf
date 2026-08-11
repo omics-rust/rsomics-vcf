@@ -1,0 +1,19 @@
+##fileformat=VCFv4.3
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=1000>
+##contig=<ID=chr2,length=1000>
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count">
+##INFO=<ID=AN,Number=1,Type=Integer,Description="Allele number">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1
+chr1	1	s1	A	G	10	PASS	.	GT	0/1
+chr1	2	d1	AT	A	10	PASS	.	GT	0/1
+chr1	7	s2	A	C	10	PASS	.	GT	0/1
+chr1	8	i1	A	AT	10	PASS	.	GT	0/1
+chr1	12	s3	A	T	10	PASS	.	GT	0/1
+chr2	1	q1	A	AT	10	PASS	AC=5;AN=10	GT	0/1
+chr2	3	q2	A	AT	20	PASS	AC=1;AN=10	GT	0/1
+chr2	7	a1	A	AT	.	PASS	AC=5;AN=10	GT	0/1
+chr2	9	a2	A	AT	.	PASS	AC=2;AN=10	GT	0/1
+chr2	13	f1	A	AT	.	PASS	.	GT	0/1
+chr2	15	f2	A	AT	.	PASS	.	GT	0/1

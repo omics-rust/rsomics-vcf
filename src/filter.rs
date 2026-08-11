@@ -1,3 +1,5 @@
+mod gaps;
+
 use noodles_vcf::{
     self as vcf,
     header::record::value::{Map, map::Filter as HeaderFilter},

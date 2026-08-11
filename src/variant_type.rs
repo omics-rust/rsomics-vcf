@@ -1,10 +1,10 @@
-const REF: u32 = 1 << 6;
-const SNP: u32 = 1 << 0;
-const MNP: u32 = 1 << 1;
-const INDEL: u32 = 1 << 2;
-const OTHER: u32 = 1 << 3;
-const BND: u32 = 1 << 4;
-const OVERLAP: u32 = 1 << 5;
+pub(crate) const REF: u32 = 1 << 6;
+pub(crate) const SNP: u32 = 1 << 0;
+pub(crate) const MNP: u32 = 1 << 1;
+pub(crate) const INDEL: u32 = 1 << 2;
+pub(crate) const OTHER: u32 = 1 << 3;
+pub(crate) const BND: u32 = 1 << 4;
+pub(crate) const OVERLAP: u32 = 1 << 5;
 
 pub(crate) fn write(output: &mut Vec<u8>, reference: &[u8], alternates: &[u8]) {
     let mask = mask(reference, alternates);
@@ -38,6 +38,18 @@ pub(crate) fn mask(reference: &[u8], alternates: &[u8]) -> u32 {
     alternates
         .split(|value| *value == b',')
         .fold(0, |mask, alternate| mask | classify(reference, alternate))
+}
+
+#[cfg(test)]
+pub(crate) fn record_mask(record: &noodles_vcf::variant::RecordBuf) -> u32 {
+    let reference = record.reference_bases().as_bytes();
+    let alternates = record.alternate_bases().as_ref();
+    if alternates.is_empty() {
+        return REF;
+    }
+    alternates.iter().fold(0, |mask, alternate| {
+        mask | classify(reference, alternate.as_bytes())
+    })
 }
 
 pub(crate) fn parse_mask(values: &str) -> Result<u32, String> {
