@@ -3,9 +3,33 @@ use crate::expression::{
     value::{Atom, Filter, Values},
 };
 
-use super::EvaluateError;
+use super::{EvaluateError, Evaluated};
 
-pub(super) fn apply<'a>(
+pub(super) fn evaluate<'a>(
+    kind: FunctionKind,
+    argument: Evaluated<'a>,
+) -> Result<Evaluated<'a>, EvaluateError> {
+    match (kind, argument) {
+        (FunctionKind::Count | FunctionKind::SampleCount, Evaluated::Values(values)) => {
+            count(kind, values).map(Evaluated::Values)
+        }
+        (FunctionKind::Count, Evaluated::Truth(truth)) => {
+            let count = truth
+                .samples
+                .map(|samples| samples.into_iter().filter(|value| *value).count())
+                .unwrap_or(usize::from(truth.site));
+            Ok(Evaluated::Values(Values::Site(vec![Atom::Number(
+                count as f64,
+            )])))
+        }
+        (_, Evaluated::Values(values)) => apply_values(kind, values).map(Evaluated::Values),
+        (_, Evaluated::Truth(_)) => Err(EvaluateError::new(
+            "function requires values rather than a truth expression",
+        )),
+    }
+}
+
+pub(super) fn apply_values<'a>(
     kind: FunctionKind,
     values: Values<'a>,
 ) -> Result<Values<'a>, EvaluateError> {
@@ -26,7 +50,7 @@ pub(super) fn apply<'a>(
         return Ok(Values::Samples(samples));
     }
     let kind = global_kind(kind);
-    let value = match values {
+    let mut value = match values {
         Values::Site(values) => reduce_atoms(kind, values.iter())?,
         Values::Samples(samples) => reduce_atoms(
             kind,
@@ -38,7 +62,49 @@ pub(super) fn apply<'a>(
                 .flat_map(|(values, _)| values),
         )?,
     };
+    if matches!(value, Atom::Missing) {
+        value = Atom::Absent;
+    }
     Ok(Values::Site(vec![value]))
+}
+
+fn count<'a>(kind: FunctionKind, values: Values<'a>) -> Result<Values<'a>, EvaluateError> {
+    match (kind, values) {
+        (FunctionKind::Count, Values::Site(values)) => Ok(Values::Site(vec![Atom::Number(
+            values
+                .iter()
+                .filter(|value| !matches!(value, Atom::Absent))
+                .count() as f64,
+        )])),
+        (FunctionKind::Count, Values::Samples(samples)) => {
+            let count = samples
+                .values
+                .iter()
+                .zip(&samples.selected)
+                .filter(|(_, selected)| **selected)
+                .flat_map(|(values, _)| values)
+                .filter(|value| !matches!(value, Atom::Absent | Atom::Missing))
+                .count();
+            Ok(Values::Site(vec![Atom::Number(count as f64)]))
+        }
+        (FunctionKind::SampleCount, Values::Samples(mut samples)) => {
+            samples.values = samples
+                .values
+                .iter()
+                .map(|values| {
+                    vec![Atom::Number(
+                        values
+                            .iter()
+                            .filter(|value| !matches!(value, Atom::Absent | Atom::Missing))
+                            .count() as f64,
+                    )]
+                })
+                .collect();
+            Ok(Values::Samples(samples))
+        }
+        (FunctionKind::SampleCount, values @ Values::Site(_)) => count(FunctionKind::Count, values),
+        _ => Err(EvaluateError::new("function is not a count operation")),
+    }
 }
 
 fn map_values<'a>(
@@ -64,6 +130,7 @@ fn map_values<'a>(
 
 fn absolute(atom: &Atom<'_>) -> Result<Atom<'static>, EvaluateError> {
     match atom {
+        Atom::Absent => Ok(Atom::Absent),
         Atom::Missing => Ok(Atom::Missing),
         Atom::Number(value) => Ok(Atom::Number(value.abs())),
         Atom::Flag => Ok(Atom::Number(1.0)),
@@ -73,6 +140,7 @@ fn absolute(atom: &Atom<'_>) -> Result<Atom<'static>, EvaluateError> {
 
 fn string_length(atom: &Atom<'_>) -> Result<Atom<'static>, EvaluateError> {
     let length = match atom {
+        Atom::Absent => return Ok(Atom::Absent),
         Atom::Missing => 0,
         Atom::Text(value) => value.len(),
         Atom::OwnedText(value) => value.len(),
@@ -97,7 +165,7 @@ where
     let mut values = Vec::new();
     for atom in atoms {
         match atom {
-            Atom::Missing => {}
+            Atom::Absent | Atom::Missing => {}
             Atom::Number(value) => values.push(*value),
             Atom::Flag => values.push(1.0),
             _ => {

@@ -94,7 +94,7 @@ fn compare_regex(
     let pattern = match &pattern[0] {
         Atom::Text(value) => *value,
         Atom::OwnedText(value) => value,
-        Atom::Missing => ".",
+        Atom::Absent | Atom::Missing => ".",
         _ => return Err(EvaluateError::new("regex pattern must be a string")),
     };
     let (pattern, case_insensitive) = pattern
@@ -127,7 +127,7 @@ fn compare_regex(
 fn regex_values(values: &[Atom<'_>], regex: &Regex, negate: bool) -> Result<bool, EvaluateError> {
     for value in values {
         let passes = match value {
-            Atom::Missing => regex.is_match(".") != negate,
+            Atom::Absent | Atom::Missing => regex.is_match(".") != negate,
             Atom::Text(value) => regex.is_match(value) != negate,
             Atom::OwnedText(value) => regex.is_match(value) != negate,
             Atom::Filter(filter) => match filter {
@@ -183,8 +183,12 @@ fn compare_atoms(
     operator: BinaryOperator,
 ) -> Result<bool, EvaluateError> {
     match (left, right) {
-        (Atom::Missing, Atom::Missing) => Ok(operator == BinaryOperator::Equal),
-        (Atom::Missing, _) | (_, Atom::Missing) => Ok(operator == BinaryOperator::NotEqual),
+        (left, right) if is_missing(left) && is_missing(right) => {
+            Ok(operator == BinaryOperator::Equal)
+        }
+        (left, right) if is_missing(left) || is_missing(right) => {
+            Ok(operator == BinaryOperator::NotEqual)
+        }
         _ => match (number(left), number(right)) {
             (Ok(Some(left)), Ok(Some(right))) => compare_numbers(left, right, operator),
             (Err(_), Err(_)) => {
@@ -201,6 +205,10 @@ fn compare_atoms(
             _ => Err(EvaluateError::new("cannot compare strings and numbers")),
         },
     }
+}
+
+fn is_missing(atom: &Atom<'_>) -> bool {
+    matches!(atom, Atom::Absent | Atom::Missing)
 }
 
 fn compare_numbers(left: f64, right: f64, operator: BinaryOperator) -> Result<bool, EvaluateError> {

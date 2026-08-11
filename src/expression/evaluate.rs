@@ -120,8 +120,8 @@ fn evaluate_node<'a>(
                     "function evaluation for this arity is not implemented",
                 ));
             };
-            let argument = require_values(evaluate_node(argument, header, record)?)?;
-            function::apply(*kind, argument).map(Evaluated::Values)
+            let argument = evaluate_node(argument, header, record)?;
+            function::evaluate(*kind, argument)
         }
     }
 }
@@ -173,7 +173,7 @@ fn require_truth(value: Evaluated<'_>) -> Result<Truth, EvaluateError> {
 
 fn number(atom: &Atom<'_>) -> Result<Option<f64>, EvaluateError> {
     match atom {
-        Atom::Missing => Ok(None),
+        Atom::Absent | Atom::Missing => Ok(None),
         Atom::Number(value) => Ok(Some(*value)),
         Atom::Flag => Ok(Some(1.0)),
         _ => Err(EvaluateError::new("expected a numeric value")),
@@ -233,6 +233,7 @@ mod tests {
 ##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
 ##INFO=<ID=AF,Number=A,Type=Float,Description=\"frequency\">\n\
 ##INFO=<ID=R,Number=R,Type=Integer,Description=\"allele values\">\n\
+##INFO=<ID=M,Number=2,Type=Integer,Description=\"values with missing\">\n\
 ##INFO=<ID=X,Number=1,Type=Integer,Description=\"optional\">\n\
 ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\">\n\
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
@@ -241,7 +242,7 @@ mod tests {
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
             .parse()
             .unwrap();
-        let line = b"chr1\t7\trs1;rs2\tA\tC,G\t50\tPASS\tDP=12;AF=0.1,0.9;R=1,2,3\tGT:DP:AD:ST\t0/1:8:4,4,0:alpha\t1/2:.:0,3,5:BETA\t0/.:2:2,0,.:.";
+        let line = b"chr1\t7\trs1;rs2\tA\tC,G\t50\tPASS\tDP=12;AF=0.1,0.9;R=1,2,3;M=1,.\tGT:DP:AD:ST\t0/1:8:4,4,0:alpha\t1/2:.:0,3,5:BETA\t0/.:2:2,0,.:.";
         let raw = vcf::Record::try_from(line.as_slice()).unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
         (header, record)
@@ -398,6 +399,10 @@ mod tests {
         assert_eq!(truth("AF[1] = 0.9", &header, &record), Truth::site(true));
         assert_eq!(truth("AF[0-1] > 0.5", &header, &record), Truth::site(true));
         assert_eq!(truth("AF[2] = '.'", &header, &record), Truth::site(true));
+        assert_eq!(
+            truth("INFO/DP[9] = 12", &header, &record),
+            Truth::site(true)
+        );
     }
 
     #[test]
@@ -551,6 +556,48 @@ mod tests {
         assert_eq!(
             truth("STRLEN('.') = 0", &header, &record),
             Truth::site(true)
+        );
+    }
+
+    #[test]
+    fn count_functions_distinguish_site_slots_sample_values_and_absence() {
+        let (header, record) = fixture();
+        for source in [
+            "COUNT(AF) = 2",
+            "COUNT(M) = 2",
+            "COUNT(M[0-1]) = 2",
+            "COUNT(M[1]) = 0",
+            "COUNT(M[3-]) = 0",
+            "COUNT(X) = 0",
+            "COUNT(AF[2]) = 0",
+            "COUNT(INFO/DP[9]) = 1",
+            "COUNT(FMT/AD) = 8",
+            "COUNT(FMT/AD[:2]) = 2",
+            "COUNT(FMT/DP) = 2",
+            "COUNT(FMT/AD[0]) = 3",
+            "COUNT(FMT/DP >= 8) = 1",
+            "COUNT(FMT/DP[0] >= 8) = 1",
+            "COUNT(SUM(X)) = 0",
+            "COUNT(SUM(M)) = 1",
+            "COUNT(SUM(M[1])) = 0",
+        ] {
+            assert_eq!(
+                truth(source, &header, &record),
+                Truth::site(true),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            truth("SMPL_COUNT(FMT/AD) = 3", &header, &record),
+            Truth::samples(vec![true, true, false])
+        );
+        assert_eq!(
+            truth("sCOUNT(FMT/DP) = 1", &header, &record),
+            Truth::samples(vec![true, false, true])
+        );
+        assert_eq!(
+            truth("sCOUNT(FMT/AD[:2]) = 1", &header, &record),
+            Truth::samples(vec![true, true, false])
         );
     }
 }

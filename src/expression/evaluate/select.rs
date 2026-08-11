@@ -17,7 +17,7 @@ pub(super) fn apply<'a>(
 ) -> Result<Values<'a>, EvaluateError> {
     match (subscript, values) {
         (BoundSubscript::Values(selector), Values::Site(values)) => {
-            select_values(values, selector, None).map(Values::Site)
+            select_site_values(values, selector).map(Values::Site)
         }
         (BoundSubscript::SampleValues { samples, values }, Values::Samples(sample_values)) => {
             select_samples(sample_values, samples, values, record).map(Values::Samples)
@@ -61,12 +61,47 @@ fn select_samples<'a>(
         let genotype = genotypes
             .as_ref()
             .map(|genotypes| genotypes[index].as_slice());
-        *values = select_values(std::mem::take(values), value_selector, genotype)?;
+        *values = select_sample_values(std::mem::take(values), value_selector, genotype)?;
     }
     Ok(samples)
 }
 
-fn select_values<'a>(
+fn select_site_values<'a>(
+    values: Vec<Atom<'a>>,
+    selector: &ValueSelector,
+) -> Result<Vec<Atom<'a>>, EvaluateError> {
+    match selector {
+        ValueSelector::All => Ok(values),
+        ValueSelector::Genotype => Err(EvaluateError::new(
+            "GT selection requires per-sample genotypes",
+        )),
+        ValueSelector::Indices(ranges)
+            if matches!(ranges.as_slice(), [IndexSelector { end: None, .. }]) =>
+        {
+            if values.len() == 1 && !matches!(values[0], Atom::Absent) {
+                return Ok(values);
+            }
+            let index = ranges[0].start;
+            Ok(match values.get(index) {
+                Some(Atom::Absent | Atom::Missing) | None => vec![Atom::Absent],
+                Some(value) => vec![value.clone()],
+            })
+        }
+        ValueSelector::Indices(ranges) => {
+            let selected: Vec<_> = expand_indices(ranges, values.len())
+                .into_iter()
+                .filter_map(|index| values.get(index).cloned())
+                .collect();
+            Ok(if selected.is_empty() {
+                vec![Atom::Absent]
+            } else {
+                selected
+            })
+        }
+    }
+}
+
+fn select_sample_values<'a>(
     values: Vec<Atom<'a>>,
     selector: &ValueSelector,
     genotype: Option<&[usize]>,

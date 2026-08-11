@@ -6,9 +6,14 @@ use crate::expression::{
 use super::{EvaluateError, number, sample_width};
 
 pub(super) fn negate(values: Values<'_>) -> Result<Values<'_>, EvaluateError> {
-    map_unary(values, |atom| match number(atom)? {
-        Some(value) => Ok(Atom::Number(-value)),
-        None => Ok(Atom::Missing),
+    map_unary(values, |atom| {
+        if matches!(atom, Atom::Absent) {
+            return Ok(Atom::Absent);
+        }
+        match number(atom)? {
+            Some(value) => Ok(Atom::Number(-value)),
+            None => Ok(Atom::Missing),
+        }
     })
 }
 
@@ -147,6 +152,9 @@ fn arithmetic_atoms<'a>(
     right: &Atom<'a>,
     operator: BinaryOperator,
 ) -> Result<Atom<'a>, EvaluateError> {
+    if matches!(left, Atom::Absent) || matches!(right, Atom::Absent) {
+        return Ok(Atom::Absent);
+    }
     let (Some(left), Some(right)) = (number(left)?, number(right)?) else {
         return Ok(Atom::Missing);
     };

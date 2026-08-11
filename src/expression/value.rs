@@ -62,6 +62,7 @@ pub(crate) fn genotype_indices(record: &RecordBuf) -> Result<Vec<Vec<usize>>, Va
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Atom<'a> {
+    Absent,
     Missing,
     Number(f64),
     Flag,
@@ -197,7 +198,7 @@ fn read_fixed<'a>(field: FixedField, record: &'a RecordBuf) -> Result<Values<'a>
 fn read_info<'a>(name: &str, record: &'a RecordBuf) -> Result<Values<'a>, ValueError> {
     let values = match record.info().as_ref().get(name) {
         Some(Some(value)) => info_atoms(value),
-        Some(None) | None => vec![Atom::Missing],
+        Some(None) | None => vec![Atom::Absent],
     };
     Ok(Values::Site(values))
 }
