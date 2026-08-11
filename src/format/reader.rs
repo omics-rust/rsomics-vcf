@@ -4,7 +4,7 @@ use std::path::Path;
 
 use flate2::bufread::MultiGzDecoder;
 use noodles_bcf as bcf;
-use noodles_vcf as vcf;
+use noodles_vcf::{self as vcf, variant::RecordBuf};
 use rsomics_common::{Context, Result, RsomicsError};
 
 use super::HeaderTypes;
@@ -23,6 +23,12 @@ enum Inner {
 pub(crate) struct Reader {
     inner: Inner,
     source: String,
+}
+
+#[derive(Default)]
+pub(crate) struct RecordScratch {
+    bcf: bcf::Record,
+    text: Vec<u8>,
 }
 
 impl Reader {
@@ -152,6 +158,34 @@ impl Reader {
                 error,
             )
         })
+    }
+
+    pub(crate) fn read_record(
+        &mut self,
+        header: &vcf::Header,
+        scratch: &mut RecordScratch,
+        number: u64,
+    ) -> Result<Option<RecordBuf>> {
+        let index = usize::try_from(number).map_err(|_| {
+            RsomicsError::InvalidInput("variant record count exceeds usize".to_owned())
+        })?;
+        if self.is_text() {
+            if self.read_text_record(&mut scratch.text, index)? == 0 {
+                return Ok(None);
+            }
+            let record = vcf::Record::try_from(scratch.text.as_slice())
+                .map_err(|error| invalid_record(&self.source, number, "parsing VCF", error))?;
+            RecordBuf::try_from_variant_record(header, &record)
+                .map(Some)
+                .map_err(|error| invalid_record(&self.source, number, "decoding VCF", error))
+        } else {
+            if self.read_bcf_record(&mut scratch.bcf, index)? == 0 {
+                return Ok(None);
+            }
+            RecordBuf::try_from_variant_record(header, &scratch.bcf)
+                .map(Some)
+                .map_err(|error| invalid_record(&self.source, number, "decoding BCF", error))
+        }
     }
 }
 
@@ -341,6 +375,17 @@ fn write_line(output: &mut Vec<u8>, line: &[u8]) {
 
 fn invalid(source: &str, operation: &str, error: io::Error) -> RsomicsError {
     RsomicsError::InvalidInput(format!("{source}: {operation}: {error}"))
+}
+
+fn invalid_record(
+    source: &str,
+    number: u64,
+    operation: &str,
+    error: impl std::fmt::Display,
+) -> RsomicsError {
+    RsomicsError::InvalidInput(format!(
+        "{source}: {operation} variant record {number}: {error}"
+    ))
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ mod writer;
 
 use serde::Serialize;
 
-pub(crate) use reader::Reader;
+pub(crate) use reader::{Reader, RecordScratch};
 pub(crate) use record::reformat_record;
 pub(crate) use text::HeaderTypes;
 pub(crate) use value::{ValueType, write_f32};

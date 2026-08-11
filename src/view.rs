@@ -5,12 +5,10 @@ mod selection;
 use std::io::Write;
 use std::path::Path;
 
-use noodles_bcf as bcf;
-use noodles_vcf::{self as vcf, variant::RecordBuf};
 use rsomics_common::{Result, RsomicsError};
 use serde::Serialize;
 
-use crate::format::{Reader, Writer, reformat_record};
+use crate::format::{Reader, RecordScratch, Writer, reformat_record};
 
 pub use crate::format::{HeaderMode, OutputFormat};
 pub use crate::regions::{OverlapMode, RegionSelection, RegionSet};
@@ -114,26 +112,13 @@ pub fn write(input: &Path, options: &Options, output: impl Write) -> Result<Summ
         });
     }
 
-    let mut bcf_record = bcf::Record::default();
-    let mut text_record = Vec::new();
+    let mut scratch = RecordScratch::default();
     let mut read = 0;
     let mut written = 0;
     loop {
         let number = read + 1;
-        let record = if reader.is_text() {
-            if reader.read_text_record(&mut text_record, usize_number(number)?)? == 0 {
-                break;
-            }
-            let record = vcf::Record::try_from(text_record.as_slice())
-                .map_err(|error| invalid(input, number, "parsing VCF", error))?;
-            RecordBuf::try_from_variant_record(&header, &record)
-                .map_err(|error| invalid(input, number, "decoding VCF", error))?
-        } else {
-            if reader.read_bcf_record(&mut bcf_record, usize_number(number)?)? == 0 {
-                break;
-            }
-            RecordBuf::try_from_variant_record(&header, &bcf_record)
-                .map_err(|error| invalid(input, number, "decoding BCF", error))?
+        let Some(record) = reader.read_record(&header, &mut scratch, number)? else {
+            break;
         };
         read += 1;
 
