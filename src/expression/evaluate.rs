@@ -10,6 +10,7 @@ use noodles_vcf::{self as vcf, variant::RecordBuf};
 mod arithmetic;
 mod comparison;
 mod logical;
+mod select;
 
 use arithmetic::{arithmetic, negate};
 use comparison::compare;
@@ -134,13 +135,12 @@ fn evaluate_value<'a>(
             )));
         }
         BoundValue::Field(field) => {
-            if field.subscript.is_some() {
-                return Err(EvaluateError::new(
-                    "field subscript evaluation is not implemented",
-                ));
+            let values = value::read(field, header, record)
+                .map_err(|error| EvaluateError::new(error.to_string()))?;
+            match &field.subscript {
+                Some(subscript) => select::apply(subscript, values, record)?,
+                None => values,
             }
-            value::read(field, header, record)
-                .map_err(|error| EvaluateError::new(error.to_string()))?
         }
     };
     Ok(Evaluated::Values(values))
@@ -382,5 +382,88 @@ mod tests {
             let expression = bind(parse(source).unwrap(), &header).unwrap();
             assert!(evaluate(&expression, &header, &record).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn info_subscripts_select_indices_ranges_and_missing_values() {
+        let (header, record) = fixture();
+        assert_eq!(truth("AF[0] = 0.1", &header, &record), Truth::site(true));
+        assert_eq!(truth("AF[1] = 0.9", &header, &record), Truth::site(true));
+        assert_eq!(truth("AF[0-1] > 0.5", &header, &record), Truth::site(true));
+        assert_eq!(truth("AF[2] = '.'", &header, &record), Truth::site(true));
+    }
+
+    #[test]
+    fn format_subscripts_keep_sample_and_value_axes_distinct() {
+        let (header, record) = fixture();
+        assert_eq!(
+            truth("FMT/DP[0] >= 8", &header, &record),
+            Truth::samples(vec![true, false, false])
+        );
+        assert_eq!(
+            truth("FMT/DP[1-] > 1", &header, &record),
+            Truth::samples(vec![false, false, true])
+        );
+        assert_eq!(
+            truth("FMT/AD[:1] >= 4", &header, &record),
+            Truth::samples(vec![true, false, false])
+        );
+        assert_eq!(
+            truth("FMT/AD[1:2] > 4", &header, &record),
+            Truth::samples(vec![false, true, false])
+        );
+        assert_eq!(
+            truth("FMT/AD[0,2:0-1] > 3", &header, &record),
+            Truth::samples(vec![true, false, false])
+        );
+        assert_eq!(
+            truth("FMT/DP[0] = '.'", &header, &record),
+            Truth::samples(vec![false, false, false])
+        );
+        assert_eq!(
+            truth("FMT/DP[1] = '.'", &header, &record),
+            Truth::samples(vec![false, true, false])
+        );
+        assert_eq!(
+            truth("FMT/DP[0] + 2 >= 10", &header, &record),
+            Truth::samples(vec![true, false, false])
+        );
+        assert_eq!(
+            truth("FMT/ST[1] ~ '^beta$/i'", &header, &record),
+            Truth::samples(vec![false, true, false])
+        );
+        assert_eq!(
+            truth("FMT/DP[0] >= 8 | FMT/AD[1:2] > 4", &header, &record,),
+            Truth::samples(vec![true, true, false])
+        );
+    }
+
+    #[test]
+    fn genotype_subscripts_select_called_alleles_per_sample() {
+        let (header, record) = fixture();
+        assert_eq!(
+            truth("FMT/AD[GT] > 4", &header, &record),
+            Truth::samples(vec![false, true, false])
+        );
+        assert_eq!(
+            truth("FMT/AD[0:GT] > 3", &header, &record),
+            Truth::samples(vec![true, false, false])
+        );
+    }
+
+    #[test]
+    fn sample_files_are_resolved_during_binding() {
+        use std::io::Write;
+
+        let (header, record) = fixture();
+        let mut samples = tempfile::NamedTempFile::new_in(".").unwrap();
+        writeln!(samples, "S2\nS3").unwrap();
+        let source = format!("FMT/DP[@{}] > 1", samples.path().display());
+        let expression = bind(parse(&source).unwrap(), &header).unwrap();
+        drop(samples);
+        assert_eq!(
+            evaluate(&expression, &header, &record).unwrap(),
+            Truth::samples(vec![false, false, true])
+        );
     }
 }

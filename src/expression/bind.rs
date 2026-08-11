@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, fs};
 
 use noodles_vcf::{
     self as vcf,
@@ -6,7 +6,8 @@ use noodles_vcf::{
 };
 
 use super::syntax::{
-    BinaryOperator, Expression, Field, Namespace, Selector, Subscript, UnaryOperator, Value,
+    BinaryOperator, Expression, Field, IndexSelector, Namespace, Selector, Subscript,
+    UnaryOperator, Value,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -41,7 +42,29 @@ pub(crate) struct BoundField {
     pub kind: FieldKind,
     pub value_type: ValueType,
     pub cardinality: Cardinality,
-    pub subscript: Option<Subscript>,
+    pub subscript: Option<BoundSubscript>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BoundSubscript {
+    Values(ValueSelector),
+    SampleValues {
+        samples: SampleSelector,
+        values: ValueSelector,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SampleSelector {
+    All,
+    Selected(Box<[bool]>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ValueSelector {
+    All,
+    Genotype,
+    Indices(Vec<IndexSelector>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -191,7 +214,7 @@ fn bind_field(field: Field, header: &vcf::Header) -> Result<BoundField, BindErro
             }
         }
     };
-    validate_subscript(&mut bound, field.subscript)?;
+    bind_subscript(&mut bound, field.subscript, header)?;
     Ok(bound)
 }
 
@@ -353,47 +376,109 @@ fn calculated_field(name: &str, header: &vcf::Header) -> Option<BoundField> {
     })
 }
 
-fn validate_subscript(
+fn bind_subscript(
     field: &mut BoundField,
     subscript: Option<Subscript>,
+    header: &vcf::Header,
 ) -> Result<(), BindError> {
     let Some(subscript) = subscript else {
         return Ok(());
     };
-    if matches!(subscript, Subscript::SampleValues { .. })
-        && !matches!(field.kind, FieldKind::Format(_))
-    {
-        return Err(BindError::new(
-            "sample:value subscripts require a FORMAT field",
-        ));
-    }
-    for selector in selectors(&subscript) {
-        if matches!(selector, Selector::Genotype)
-            && !matches!(
-                field.cardinality,
-                Cardinality::ReferenceAlternateBases | Cardinality::AlternateBases
-            )
-        {
+    field.subscript = Some(match (&field.kind, subscript) {
+        (FieldKind::Format(_), Subscript::Values(Selector::Genotype)) => {
+            BoundSubscript::SampleValues {
+                samples: SampleSelector::All,
+                values: bind_value_selector(Selector::Genotype, field)?,
+            }
+        }
+        (FieldKind::Format(_), Subscript::Values(Selector::Any)) => BoundSubscript::SampleValues {
+            samples: SampleSelector::All,
+            values: ValueSelector::All,
+        },
+        (FieldKind::Format(_), Subscript::Values(selector)) => BoundSubscript::SampleValues {
+            samples: bind_sample_selector(selector, header)?,
+            values: ValueSelector::All,
+        },
+        (FieldKind::Format(_), Subscript::SampleValues { samples, values }) => {
+            BoundSubscript::SampleValues {
+                samples: bind_sample_selector(samples, header)?,
+                values: bind_value_selector(values, field)?,
+            }
+        }
+        (_, Subscript::Values(selector)) => {
+            BoundSubscript::Values(bind_value_selector(selector, field)?)
+        }
+        (_, Subscript::SampleValues { .. }) => {
             return Err(BindError::new(
-                "GT-selected subscripts require Number=R or Number=A",
+                "sample:value subscripts require a FORMAT field",
             ));
         }
-        if matches!(selector, Selector::File(_)) && !matches!(field.kind, FieldKind::Format(_)) {
-            return Err(BindError::new(
-                "file-selected samples require a FORMAT field",
-            ));
-        }
-    }
-    field.subscript = Some(subscript);
+    });
     Ok(())
 }
 
-fn selectors(subscript: &Subscript) -> impl Iterator<Item = &Selector> {
-    let (first, second) = match subscript {
-        Subscript::Values(values) => (values, None),
-        Subscript::SampleValues { samples, values } => (samples, Some(values)),
-    };
-    std::iter::once(first).chain(second)
+fn bind_sample_selector(
+    selector: Selector,
+    header: &vcf::Header,
+) -> Result<SampleSelector, BindError> {
+    match selector {
+        Selector::Any => Ok(SampleSelector::All),
+        Selector::Indices(indices) => {
+            let mut selected = vec![false; header.sample_names().len()];
+            for index in indices {
+                let end = match index.end {
+                    Some(usize::MAX) => selected.len().saturating_sub(1),
+                    Some(end) => end,
+                    None => index.start,
+                };
+                if index.start >= selected.len() || end >= selected.len() {
+                    return Err(BindError::new(format!(
+                        "sample index {} is out of range for {} samples",
+                        index.start.max(end),
+                        selected.len()
+                    )));
+                }
+                selected[index.start..=end].fill(true);
+            }
+            Ok(SampleSelector::Selected(selected.into_boxed_slice()))
+        }
+        Selector::File(path) => {
+            let source = fs::read_to_string(&path).map_err(|error| {
+                BindError::new(format!(
+                    "failed to read sample file {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let mut selected = vec![false; header.sample_names().len()];
+            for name in source.split_ascii_whitespace() {
+                let index = header.sample_names().get_index_of(name).ok_or_else(|| {
+                    BindError::new(format!("sample {name} is not present in the VCF header"))
+                })?;
+                selected[index] = true;
+            }
+            Ok(SampleSelector::Selected(selected.into_boxed_slice()))
+        }
+        Selector::Genotype => Err(BindError::new("GT cannot be used to select FORMAT samples")),
+    }
+}
+
+fn bind_value_selector(selector: Selector, field: &BoundField) -> Result<ValueSelector, BindError> {
+    match selector {
+        Selector::Any => Ok(ValueSelector::All),
+        Selector::Indices(indices) => Ok(ValueSelector::Indices(indices)),
+        Selector::Genotype
+            if matches!(field.kind, FieldKind::Format(_))
+                && field.cardinality == Cardinality::ReferenceAlternateBases =>
+        {
+            Ok(ValueSelector::Genotype)
+        }
+        Selector::Genotype => Err(BindError::new(
+            "GT-selected subscripts require a FORMAT Number=R field",
+        )),
+        Selector::File(_) => Err(BindError::new(
+            "sample files cannot select values within a field",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -431,7 +516,7 @@ mod tests {
                 kind: FieldKind::Info("AF".to_owned()),
                 value_type: ValueType::Float,
                 cardinality: Cardinality::AlternateBases,
-                subscript: Some(Subscript::Values(Selector::Indices(vec![
+                subscript: Some(BoundSubscript::Values(ValueSelector::Indices(vec![
                     super::super::syntax::IndexSelector {
                         start: 0,
                         end: None,
@@ -443,6 +528,13 @@ mod tests {
         assert_eq!(ad.kind, FieldKind::Format("AD".to_owned()));
         assert_eq!(ad.value_type, ValueType::Integer);
         assert_eq!(ad.cardinality, Cardinality::ReferenceAlternateBases);
+        assert_eq!(
+            ad.subscript,
+            Some(BoundSubscript::SampleValues {
+                samples: SampleSelector::Selected(vec![true].into_boxed_slice()),
+                values: ValueSelector::Genotype,
+            })
+        );
     }
 
     #[test]
@@ -472,7 +564,11 @@ mod tests {
             "QUAL[0:1] > 1",
             "INFO/R[0:GT] > 1",
             "INFO/R[@samples] > 1",
+            "INFO/R[GT] > 1",
             "FMT/DP[GT] > 1",
+            "FMT/AD[GT:0] > 1",
+            "FMT/AD[0:@values] > 1",
+            "FMT/AD[2] > 1",
         ] {
             assert!(bind(parse(source).unwrap(), &header()).is_err(), "{source}");
         }

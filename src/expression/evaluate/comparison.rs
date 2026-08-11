@@ -20,34 +20,58 @@ pub(super) fn compare(
             compare_cross(&left, &right, operator).map(Truth::site)
         }
         (Values::Samples(left), Values::Samples(right)) => {
-            if left.len() != right.len() {
+            if left.values.len() != right.values.len() {
                 return Err(EvaluateError::new(format!(
                     "incompatible sample counts in comparison: {} vs {}",
-                    left.len(),
-                    right.len()
+                    left.values.len(),
+                    right.values.len()
                 )));
             }
-            let left_width = sample_width(&left);
-            let right_width = sample_width(&right);
+            let left_width = sample_width(&left.values);
+            let right_width = sample_width(&right.values);
             if left_width != right_width {
                 return Err(EvaluateError::new(format!(
                     "incompatible per-sample value counts in comparison: {left_width} vs {right_width}"
                 )));
             }
-            left.iter()
-                .zip(&right)
-                .map(|(left, right)| compare_pairs(left, right, left_width, operator))
+            left.values
+                .iter()
+                .zip(&right.values)
+                .zip(left.selected.iter().zip(&right.selected))
+                .map(|((left, right), (left_selected, right_selected))| {
+                    if *left_selected && *right_selected {
+                        compare_pairs(left, right, left_width, operator)
+                    } else {
+                        Ok(false)
+                    }
+                })
                 .collect::<Result<_, _>>()
                 .map(Truth::samples)
         }
         (Values::Samples(samples), Values::Site(site)) => samples
+            .values
             .iter()
-            .map(|sample| compare_cross(sample, &site, operator))
+            .zip(&samples.selected)
+            .map(|(sample, selected)| {
+                if *selected {
+                    compare_cross(sample, &site, operator)
+                } else {
+                    Ok(false)
+                }
+            })
             .collect::<Result<_, _>>()
             .map(Truth::samples),
         (Values::Site(site), Values::Samples(samples)) => samples
+            .values
             .iter()
-            .map(|sample| compare_cross(&site, sample, operator))
+            .zip(&samples.selected)
+            .map(|(sample, selected)| {
+                if *selected {
+                    compare_cross(&site, sample, operator)
+                } else {
+                    Ok(false)
+                }
+            })
             .collect::<Result<_, _>>()
             .map(Truth::samples),
     }
@@ -85,8 +109,16 @@ fn compare_regex(
     match values {
         Values::Site(values) => regex_values(&values, &regex, negate).map(Truth::site),
         Values::Samples(samples) => samples
+            .values
             .iter()
-            .map(|values| regex_values(values, &regex, negate))
+            .zip(&samples.selected)
+            .map(|(values, selected)| {
+                if *selected {
+                    regex_values(values, &regex, negate)
+                } else {
+                    Ok(false)
+                }
+            })
             .collect::<Result<_, _>>()
             .map(Truth::samples),
     }

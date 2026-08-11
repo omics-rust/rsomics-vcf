@@ -17,7 +17,47 @@ use super::bind::{BoundField, CalculatedField, FieldKind, FixedField};
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Values<'a> {
     Site(Vec<Atom<'a>>),
-    Samples(Vec<Vec<Atom<'a>>>),
+    Samples(SampleValues<'a>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SampleValues<'a> {
+    pub values: Vec<Vec<Atom<'a>>>,
+    pub selected: Box<[bool]>,
+}
+
+impl<'a> SampleValues<'a> {
+    pub(crate) fn all(values: Vec<Vec<Atom<'a>>>) -> Self {
+        Self {
+            selected: vec![true; values.len()].into_boxed_slice(),
+            values,
+        }
+    }
+}
+
+pub(crate) fn genotype_indices(record: &RecordBuf) -> Result<Vec<Vec<usize>>, ValueError> {
+    let sample_count = record.samples().values().count();
+    let Some(genotypes) = record.samples().select("GT") else {
+        return Ok(vec![Vec::new(); sample_count]);
+    };
+    (0..sample_count)
+        .map(|index| match genotypes.get(index).flatten() {
+            Some(SampleValue::Genotype(genotype)) => {
+                let mut indices = Vec::new();
+                for allele in genotype.as_ref() {
+                    if let Some(position) = allele.position()
+                        && !indices.contains(&position)
+                    {
+                        indices.push(position);
+                    }
+                }
+                indices.sort_unstable();
+                Ok(indices)
+            }
+            Some(_) => Err(ValueError::new("FORMAT/GT is not a genotype")),
+            None => Ok(Vec::new()),
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -196,13 +236,13 @@ fn read_format<'a>(name: &str, record: &'a RecordBuf) -> Result<Values<'a>, Valu
         .get_index_of(name)
         .is_none()
     {
-        return Ok(Values::Samples(
+        return Ok(Values::Samples(SampleValues::all(
             record
                 .samples()
                 .values()
                 .map(|_| vec![Atom::Missing])
                 .collect(),
-        ));
+        )));
     }
     let samples = record
         .samples()
@@ -212,7 +252,7 @@ fn read_format<'a>(name: &str, record: &'a RecordBuf) -> Result<Values<'a>, Valu
             None => Ok(vec![Atom::Missing]),
         })
         .collect::<Result<Vec<_>, ValueError>>()?;
-    Ok(Values::Samples(samples))
+    Ok(Values::Samples(SampleValues::all(samples)))
 }
 
 fn sample_atoms(value: &SampleValue) -> Result<Vec<Atom<'_>>, ValueError> {
@@ -523,19 +563,19 @@ mod tests {
         let (header, record) = record();
         assert_eq!(
             values("FMT/DP", &header, &record),
-            Values::Samples(vec![
+            Values::Samples(SampleValues::all(vec![
                 vec![Atom::Number(8.0)],
                 vec![Atom::Missing],
                 vec![Atom::Number(2.0)],
-            ])
+            ]))
         );
         assert_eq!(
             values("FMT/AD", &header, &record),
-            Values::Samples(vec![
+            Values::Samples(SampleValues::all(vec![
                 vec![Atom::Number(4.0), Atom::Number(4.0), Atom::Number(0.0)],
                 vec![Atom::Number(0.0), Atom::Number(3.0), Atom::Number(5.0)],
                 vec![Atom::Number(2.0), Atom::Number(0.0), Atom::Missing],
-            ])
+            ]))
         );
     }
 

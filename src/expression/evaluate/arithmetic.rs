@@ -1,6 +1,6 @@
 use crate::expression::{
     syntax::BinaryOperator,
-    value::{Atom, Values},
+    value::{Atom, SampleValues, Values},
 };
 
 use super::{EvaluateError, number, sample_width};
@@ -22,11 +22,14 @@ fn map_unary<'a>(
             .map(&operation)
             .collect::<Result<_, _>>()
             .map(Values::Site),
-        Values::Samples(samples) => samples
-            .iter()
-            .map(|values| values.iter().map(&operation).collect::<Result<_, _>>())
-            .collect::<Result<_, _>>()
-            .map(Values::Samples),
+        Values::Samples(mut samples) => {
+            samples.values = samples
+                .values
+                .iter()
+                .map(|values| values.iter().map(&operation).collect::<Result<_, _>>())
+                .collect::<Result<_, _>>()?;
+            Ok(Values::Samples(samples))
+        }
     }
 }
 
@@ -40,23 +43,31 @@ pub(super) fn arithmetic<'a>(
             arithmetic_vectors(&left, &right, operator).map(Values::Site)
         }
         (Values::Samples(left), Values::Samples(right)) => {
-            if left.len() != right.len() {
+            if left.values.len() != right.values.len() {
                 return Err(EvaluateError::new(format!(
                     "incompatible sample counts in arithmetic: {} vs {}",
-                    left.len(),
-                    right.len()
+                    left.values.len(),
+                    right.values.len()
                 )));
             }
-            let left_width = sample_width(&left);
-            let right_width = sample_width(&right);
+            let left_width = sample_width(&left.values);
+            let right_width = sample_width(&right.values);
             let width = broadcast_width(left_width, right_width)?;
-            left.iter()
-                .zip(&right)
+            let values = left
+                .values
+                .iter()
+                .zip(&right.values)
                 .map(|(left, right)| {
                     arithmetic_sample(left, right, left_width, right_width, width, operator)
                 })
-                .collect::<Result<_, _>>()
-                .map(Values::Samples)
+                .collect::<Result<_, _>>()?;
+            let selected = left
+                .selected
+                .iter()
+                .zip(&right.selected)
+                .map(|(left, right)| *left && *right)
+                .collect();
+            Ok(Values::Samples(SampleValues { values, selected }))
         }
         (Values::Samples(samples), Values::Site(site)) => {
             arithmetic_samples_site(samples, site, operator, false)
@@ -100,7 +111,7 @@ fn arithmetic_sample<'a>(
 }
 
 fn arithmetic_samples_site<'a>(
-    samples: Vec<Vec<Atom<'a>>>,
+    mut samples: SampleValues<'a>,
     site: Vec<Atom<'a>>,
     operator: BinaryOperator,
     site_first: bool,
@@ -112,7 +123,8 @@ fn arithmetic_samples_site<'a>(
         )));
     }
     let site = &site[0];
-    samples
+    samples.values = samples
+        .values
         .iter()
         .map(|sample| {
             sample
@@ -126,8 +138,8 @@ fn arithmetic_samples_site<'a>(
                 })
                 .collect::<Result<_, _>>()
         })
-        .collect::<Result<_, _>>()
-        .map(Values::Samples)
+        .collect::<Result<_, _>>()?;
+    Ok(Values::Samples(samples))
 }
 
 fn arithmetic_atoms<'a>(
