@@ -17,6 +17,10 @@ fn index_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index.vcf")
 }
 
+fn literal_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/filter-mask.vcf")
+}
+
 fn run(command: &mut Command) -> Output {
     let output = command.output().unwrap();
     assert!(
@@ -115,6 +119,19 @@ fn literal_variant_overlap_matches_bcftools() {
         let ours = body_ours(&input, &["-r", region, "--regions-overlap", "variant"]);
         let oracle = body_bcftools(&input, &["-r", region, "--regions-overlap", "2"]);
         assert_eq!(ours, oracle, "{region}");
+    }
+
+    for (input, region) in [
+        (literal_fixture(), "chr1:10-10"),
+        (literal_fixture(), "chr1:12-12"),
+        (literal_fixture(), "chr1:14-14"),
+        (fixture(), "chr1:25-25"),
+        (fixture(), "chr1:26-26"),
+        (fixture(), "chr2:15-15"),
+    ] {
+        let ours = body_ours(&input, &["-t", region, "--targets-overlap", "variant"]);
+        let oracle = body_bcftools(&input, &["-t", region, "--targets-overlap", "2"]);
+        assert_eq!(ours, oracle, "streaming {region}");
     }
 }
 

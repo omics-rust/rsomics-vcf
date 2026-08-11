@@ -98,9 +98,9 @@ pub(crate) fn overlaps(record: &RecordBuf, interval: Interval, mode: OverlapMode
     match mode {
         OverlapMode::Position => interval.contains(start),
         OverlapMode::Record => interval.intersects(record_interval(record, start)),
-        OverlapMode::Variant => variant_intervals(record, start)
-            .into_iter()
-            .any(|variant| interval.intersects(variant)),
+        OverlapMode::Variant => {
+            variant_interval(record, start).is_some_and(|variant| interval.intersects(variant))
+        }
     }
 }
 
@@ -123,49 +123,70 @@ fn record_interval(record: &RecordBuf, start: Position) -> Interval {
     Interval::from(start..=end)
 }
 
-fn variant_intervals(record: &RecordBuf, start: Position) -> Vec<Interval> {
+fn variant_interval(record: &RecordBuf, start: Position) -> Option<Interval> {
+    let alternates = record.alternate_bases();
+    if alternates.as_ref().is_empty() {
+        return None;
+    }
     let reference = record.reference_bases().as_bytes();
-    let mut intervals = Vec::new();
-    for alternate in record.alternate_bases().as_ref() {
-        let alternate = alternate.as_bytes();
-        if alternate.starts_with(b"<") {
-            intervals.push(record_interval(record, start));
-            continue;
+    let end = record_interval(record, start).end().unwrap();
+    let mut offset = usize::from(end) - usize::from(start) + 1;
+    for alternate in alternates.as_ref() {
+        let prefix = reference
+            .iter()
+            .zip(alternate.as_bytes())
+            .take_while(|(reference, alternate)| reference == alternate)
+            .count();
+        offset = offset.min(prefix);
+        if offset == 0 {
+            break;
         }
-        if alternate == b"*" || alternate.contains(&b'[') || alternate.contains(&b']') {
-            intervals.push(Interval::from(start..=start));
-            continue;
-        }
+    }
+    let variant_start = start.checked_add(offset)?;
+    (variant_start <= end).then(|| Interval::from(variant_start..=end))
+}
 
-        let mut prefix = 0;
-        while prefix < reference.len()
-            && prefix < alternate.len()
-            && reference[prefix].eq_ignore_ascii_case(&alternate[prefix])
-        {
-            prefix += 1;
-        }
-        let mut reference_end = reference.len();
-        let mut alternate_end = alternate.len();
-        while reference_end > prefix
-            && alternate_end > prefix
-            && reference[reference_end - 1].eq_ignore_ascii_case(&alternate[alternate_end - 1])
-        {
-            reference_end -= 1;
-            alternate_end -= 1;
-        }
-        if reference_end == prefix && alternate_end == prefix {
-            intervals.push(Interval::from(start..=start));
-            continue;
-        }
-        let variant_start = start.checked_add(prefix).unwrap_or(Position::MAX);
-        let changed_reference = reference_end.saturating_sub(prefix);
-        let variant_end = variant_start
-            .checked_add(changed_reference.saturating_sub(1))
-            .unwrap_or(variant_start);
-        intervals.push(Interval::from(variant_start..=variant_end));
+#[cfg(test)]
+mod tests {
+    use noodles_vcf::{self as vcf, variant::RecordBuf};
+
+    use super::*;
+
+    fn record(value: &[u8]) -> RecordBuf {
+        let header: vcf::Header = "##fileformat=VCFv4.3\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            .parse()
+            .unwrap();
+        let record = vcf::Record::try_from(value).unwrap();
+        RecordBuf::try_from_variant_record(&header, &record).unwrap()
     }
-    if intervals.is_empty() {
-        intervals.push(Interval::from(start..=start));
+
+    #[test]
+    fn literal_variant_overlap_keeps_the_reference_suffix() {
+        let record = record(b"chr1\t10\t.\tAACGT\tAATGT\t10\tPASS\t.");
+        assert!(!overlaps(
+            &record,
+            "12-14".parse().unwrap(),
+            OverlapMode::Position
+        ));
+        assert!(overlaps(
+            &record,
+            "14".parse().unwrap(),
+            OverlapMode::Variant
+        ));
     }
-    intervals
+
+    #[test]
+    fn literal_insertions_and_absent_alternates_have_no_reference_span() {
+        for record in [
+            record(b"chr1\t25\t.\tA\tAT\t10\tPASS\t."),
+            record(b"chr1\t25\t.\tA\t.\t10\tPASS\t."),
+        ] {
+            assert!(!overlaps(
+                &record,
+                "25-26".parse().unwrap(),
+                OverlapMode::Variant
+            ));
+        }
+    }
 }
