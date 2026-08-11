@@ -126,6 +126,85 @@ pub(crate) struct Program {
     set_genotypes: Option<GenotypeReplacement>,
 }
 
+pub(crate) struct Processor {
+    program: Option<Program>,
+    gaps: Option<gaps::GapBuffer>,
+}
+
+impl Processor {
+    pub(crate) fn bind(
+        header: &mut vcf::Header,
+        source: Option<&str>,
+        options: Options,
+        mut gap_options: gaps::Options,
+    ) -> Result<Self> {
+        let has_program = source.is_some() || options.mask.is_some();
+        let has_gaps = gap_options.snp_gap.is_some() || gap_options.indel_gap.is_some();
+        if !has_program && !has_gaps {
+            return Err(RsomicsError::ConfigError(
+                "filter requires an expression, mask, SnpGap, or IndelGap".to_owned(),
+            ));
+        }
+        if !has_program && options.set_genotypes.is_some() {
+            return Err(RsomicsError::ConfigError(
+                "setting failed genotypes requires an expression or mask".to_owned(),
+            ));
+        }
+
+        gap_options.soft = options.soft_filter.is_some();
+        let program = has_program
+            .then(|| Program::bind(header, source, options))
+            .transpose()?;
+        let gaps = has_gaps
+            .then(|| gaps::GapBuffer::new(header, gap_options))
+            .transpose()?;
+        Ok(Self { program, gaps })
+    }
+
+    pub(crate) fn push<F>(
+        &mut self,
+        header: &vcf::Header,
+        mut record: RecordBuf,
+        emit: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(RecordBuf) -> Result<()>,
+    {
+        if let Some(program) = &self.program
+            && program
+                .apply(header, &mut record, RetainFailed::No)?
+                .disposition()
+                == Disposition::Drop
+        {
+            return Ok(());
+        }
+        let Some(gaps) = &mut self.gaps else {
+            return emit(record);
+        };
+        for output in gaps.push(record)? {
+            if output.disposition() == Disposition::Keep {
+                emit(output.into_record())?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish<F>(&mut self, emit: &mut F) -> Result<()>
+    where
+        F: FnMut(RecordBuf) -> Result<()>,
+    {
+        let Some(gaps) = &mut self.gaps else {
+            return Ok(());
+        };
+        for output in gaps.finish()? {
+            if output.disposition() == Disposition::Keep {
+                emit(output.into_record())?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Program {
     pub(crate) fn bind(
         header: &mut vcf::Header,
@@ -453,6 +532,31 @@ mod tests {
             Some(Some(InfoValue::Array(Array::Integer(values)))) => values.clone(),
             _ => Vec::new(),
         }
+    }
+
+    fn process(
+        mut processor: Processor,
+        header: &vcf::Header,
+        records: &[&[u8]],
+    ) -> Vec<RecordBuf> {
+        let mut output = Vec::new();
+        for record in records {
+            let record = vcf::Record::try_from(*record).unwrap();
+            let record = RecordBuf::try_from_variant_record(header, &record).unwrap();
+            processor
+                .push(header, record, &mut |record| {
+                    output.push(record);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        processor
+            .finish(&mut |record| {
+                output.push(record);
+                Ok(())
+            })
+            .unwrap();
+        output
     }
 
     #[test]
@@ -855,5 +959,96 @@ mod tests {
             header.filters().get("Masked").unwrap().description(),
             "Record masked by region"
         );
+    }
+
+    #[test]
+    fn processor_filters_records_before_gap_context() {
+        let (mut header, _) = fixture();
+        let processor = Processor::bind(
+            &mut header,
+            Some("QUAL >= 10"),
+            Options::default(),
+            gaps::Options {
+                snp_gap: Some(gaps::SnpGap {
+                    distance: 3,
+                    types: crate::variant_type::INDEL,
+                }),
+                ..gaps::Options::default()
+            },
+        )
+        .unwrap();
+        let output = process(
+            processor,
+            &header,
+            &[
+                b"chr1\t10\t.\tA\tC\t10\tPASS\t.\tDP\t8\t20",
+                b"chr1\t12\t.\tA\tAT\t1\tPASS\t.\tDP\t8\t20",
+            ],
+        );
+
+        assert_eq!(
+            output
+                .iter()
+                .map(|record| usize::from(record.variant_start().unwrap()))
+                .collect::<Vec<_>>(),
+            [10]
+        );
+        assert!(output[0].filters().is_pass());
+    }
+
+    #[test]
+    fn processor_keeps_soft_failures_in_gap_context() {
+        let (mut header, _) = fixture();
+        let processor = Processor::bind(
+            &mut header,
+            Some("QUAL >= 10"),
+            Options {
+                soft_filter: Some("ExprFail".to_owned()),
+                ..Options::default()
+            },
+            gaps::Options {
+                snp_gap: Some(gaps::SnpGap {
+                    distance: 3,
+                    types: crate::variant_type::INDEL,
+                }),
+                ..gaps::Options::default()
+            },
+        )
+        .unwrap();
+        let output = process(
+            processor,
+            &header,
+            &[
+                b"chr1\t10\t.\tA\tC\t10\tPASS\t.\tDP\t8\t20",
+                b"chr1\t12\t.\tA\tAT\t1\tPASS\t.\tDP\t8\t20",
+            ],
+        );
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(
+            output[0].filters().as_ref().iter().collect::<Vec<_>>(),
+            ["SnpGap"]
+        );
+        assert_eq!(
+            output[1].filters().as_ref().iter().collect::<Vec<_>>(),
+            ["ExprFail"]
+        );
+    }
+
+    #[test]
+    fn processor_accepts_gap_only_filters() {
+        let (mut header, _) = fixture();
+        Processor::bind(
+            &mut header,
+            None,
+            Options::default(),
+            gaps::Options {
+                indel_gap: Some(2),
+                ..gaps::Options::default()
+            },
+        )
+        .unwrap();
+
+        assert!(header.filters().contains_key("IndelGap"));
     }
 }

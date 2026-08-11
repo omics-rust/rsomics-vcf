@@ -41,6 +41,10 @@ impl GapOutput {
     pub(crate) fn disposition(&self) -> Disposition {
         self.disposition
     }
+
+    pub(crate) fn into_record(self) -> RecordBuf {
+        self.record
+    }
 }
 
 struct Entry {
