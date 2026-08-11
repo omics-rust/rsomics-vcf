@@ -61,6 +61,9 @@ pub(super) fn evaluate<'a>(
         (_, Evaluated::Truth(_)) => Err(EvaluateError::new(
             "function requires values rather than a truth expression",
         )),
+        (_, Evaluated::Set(_)) => Err(EvaluateError::new(
+            "value file cannot be used as a function argument",
+        )),
     }
 }
 

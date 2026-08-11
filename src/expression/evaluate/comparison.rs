@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use regex::{Regex, RegexBuilder};
 
 use crate::expression::{
@@ -86,6 +88,61 @@ pub(super) fn compare(
             Ok(Truth::selected_samples(passes, samples.selected))
         }
     }
+}
+
+pub(super) fn compare_set(
+    values: Values<'_>,
+    set: &HashSet<String>,
+    operator: BinaryOperator,
+) -> Result<Truth, EvaluateError> {
+    let negate = match operator {
+        BinaryOperator::Equal => false,
+        BinaryOperator::NotEqual => true,
+        _ => {
+            return Err(EvaluateError::new(
+                "value files support only equality comparisons",
+            ));
+        }
+    };
+    match values {
+        Values::Site(values) => set_matches(&values, set, negate).map(Truth::site),
+        Values::Samples(samples) => {
+            let passes = samples
+                .values
+                .iter()
+                .zip(&samples.selected)
+                .map(|(values, selected)| {
+                    if *selected {
+                        set_matches(values, set, negate)
+                    } else {
+                        Ok(false)
+                    }
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Truth::selected_samples(passes, samples.selected))
+        }
+    }
+}
+
+fn set_matches(
+    values: &[Atom<'_>],
+    set: &HashSet<String>,
+    negate: bool,
+) -> Result<bool, EvaluateError> {
+    let mut matches = false;
+    for value in values {
+        matches |= match value {
+            Atom::Absent | Atom::Missing => false,
+            Atom::Text(value) => set.contains(*value),
+            Atom::OwnedText(value) => set.contains(value),
+            _ => {
+                return Err(EvaluateError::new(
+                    "value files can be compared only with strings",
+                ));
+            }
+        };
+    }
+    Ok(matches != negate)
 }
 
 fn compare_regex(

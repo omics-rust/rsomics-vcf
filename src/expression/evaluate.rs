@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use super::{
     bind::{BoundExpression, BoundValue},
@@ -82,23 +82,27 @@ impl std::error::Error for EvaluateError {}
 enum Evaluated<'a> {
     Values(Values<'a>),
     Truth(Truth),
+    Set(&'a HashSet<String>),
 }
 
-pub(crate) fn evaluate(
-    expression: &BoundExpression,
+pub(crate) fn evaluate<'a>(
+    expression: &'a BoundExpression,
     header: &vcf::Header,
-    record: &RecordBuf,
+    record: &'a RecordBuf,
 ) -> Result<Truth, EvaluateError> {
     match evaluate_node(expression, header, record)? {
         Evaluated::Truth(truth) => Ok(truth),
         Evaluated::Values(_) => Err(EvaluateError::new(
             "filter expression does not produce a truth value",
         )),
+        Evaluated::Set(_) => Err(EvaluateError::new(
+            "value file must be used in an equality comparison",
+        )),
     }
 }
 
 fn evaluate_node<'a>(
-    expression: &BoundExpression,
+    expression: &'a BoundExpression,
     header: &vcf::Header,
     record: &'a RecordBuf,
 ) -> Result<Evaluated<'a>, EvaluateError> {
@@ -124,8 +128,7 @@ fn evaluate_node<'a>(
                 arithmetic(require_values(left)?, require_values(right)?, *operator)
                     .map(Evaluated::Values)
             } else if operator.is_comparison() {
-                compare(require_values(left)?, require_values(right)?, *operator)
-                    .map(Evaluated::Truth)
+                compare_evaluated(left, right, *operator).map(Evaluated::Truth)
             } else if operator.is_logical() {
                 logical(require_truth(left)?, require_truth(right)?, *operator)
                     .map(Evaluated::Truth)
@@ -144,7 +147,7 @@ fn evaluate_node<'a>(
 }
 
 fn evaluate_value<'a>(
-    value: &BoundValue,
+    value: &'a BoundValue,
     header: &vcf::Header,
     record: &'a RecordBuf,
 ) -> Result<Evaluated<'a>, EvaluateError> {
@@ -152,12 +155,7 @@ fn evaluate_value<'a>(
         BoundValue::Number(value) => Values::Site(vec![Atom::Number(*value)]),
         BoundValue::String(value) => Values::Site(vec![Atom::OwnedText(value.clone())]),
         BoundValue::Missing => Values::Site(vec![Atom::Missing]),
-        BoundValue::File(path) => {
-            return Err(EvaluateError::new(format!(
-                "value file {} is not loaded",
-                path.display()
-            )));
-        }
+        BoundValue::File(values) => return Ok(Evaluated::Set(values)),
         BoundValue::Field(field) => {
             let values = value::read(field, header, record)
                 .map_err(|error| EvaluateError::new(error.to_string()))?;
@@ -170,11 +168,34 @@ fn evaluate_value<'a>(
     Ok(Evaluated::Values(values))
 }
 
+fn compare_evaluated(
+    left: Evaluated<'_>,
+    right: Evaluated<'_>,
+    operator: BinaryOperator,
+) -> Result<Truth, EvaluateError> {
+    match (left, right) {
+        (Evaluated::Values(left), Evaluated::Values(right)) => compare(left, right, operator),
+        (Evaluated::Values(values), Evaluated::Set(set))
+        | (Evaluated::Set(set), Evaluated::Values(values)) => {
+            comparison::compare_set(values, set, operator)
+        }
+        (Evaluated::Set(_), Evaluated::Set(_)) => {
+            Err(EvaluateError::new("cannot compare two value files"))
+        }
+        _ => Err(EvaluateError::new(
+            "truth value cannot be used as a comparison operand",
+        )),
+    }
+}
+
 fn require_values(value: Evaluated<'_>) -> Result<Values<'_>, EvaluateError> {
     match value {
         Evaluated::Values(values) => Ok(values),
         Evaluated::Truth(_) => Err(EvaluateError::new(
             "truth value cannot be used as an arithmetic operand",
+        )),
+        Evaluated::Set(_) => Err(EvaluateError::new(
+            "value file cannot be used as an arithmetic operand",
         )),
     }
 }
@@ -184,6 +205,9 @@ fn require_truth(value: Evaluated<'_>) -> Result<Truth, EvaluateError> {
         Evaluated::Truth(truth) => Ok(truth),
         Evaluated::Values(_) => Err(EvaluateError::new(
             "value cannot be used as a logical operand",
+        )),
+        Evaluated::Set(_) => Err(EvaluateError::new(
+            "value file cannot be used as a logical operand",
         )),
     }
 }
@@ -239,6 +263,8 @@ impl OperatorKind for BinaryOperator {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use noodles_vcf::{self as vcf, variant::RecordBuf};
 
     use super::*;
@@ -723,6 +749,39 @@ mod tests {
             ),
             Truth::samples(vec![true])
         );
+    }
+
+    #[test]
+    fn value_files_match_id_and_format_strings_as_sets() {
+        let (header, record) = fixture();
+        let mut file = tempfile::NamedTempFile::new_in(".").unwrap();
+        writeln!(file, "rs2 annotation\nBETA").unwrap();
+        let path = file.path().display();
+        assert_eq!(
+            truth(&format!("ID=@{path}"), &header, &record),
+            Truth::site(true)
+        );
+        assert_eq!(
+            truth(&format!("ID!=@{path}"), &header, &record),
+            Truth::site(false)
+        );
+        assert_eq!(
+            truth(&format!("FMT/ST=@{path}"), &header, &record),
+            Truth::samples(vec![false, true, false])
+        );
+        assert_eq!(
+            truth(&format!("FMT/ST!=@{path}"), &header, &record),
+            Truth::samples(vec![true, false, true])
+        );
+        assert!(bind(parse(&format!("ID>@{path}")).unwrap(), &header).is_err());
+    }
+
+    #[test]
+    fn missing_value_files_fail_during_binding() {
+        let (header, _) = fixture();
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let source = format!("ID=@{}", directory.path().join("missing").display());
+        assert!(bind(parse(&source).unwrap(), &header).is_err());
     }
 
     #[test]

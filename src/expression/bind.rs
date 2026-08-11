@@ -1,4 +1,4 @@
-use std::{fmt, fs};
+use std::{collections::HashSet, fmt, fs};
 
 use noodles_vcf::{
     self as vcf,
@@ -58,7 +58,7 @@ pub(crate) enum BoundValue {
     Number(f64),
     String(String),
     Missing,
-    File(std::path::PathBuf),
+    File(HashSet<String>),
     Field(BoundField),
 }
 
@@ -185,11 +185,26 @@ pub(crate) fn bind(
             operator,
             left,
             right,
-        } => Ok(BoundExpression::Binary {
-            operator,
-            left: Box::new(bind(*left, header)?),
-            right: Box::new(bind(*right, header)?),
-        }),
+        } => {
+            let left = bind(*left, header)?;
+            let right = bind(*right, header)?;
+            let file_count = usize::from(is_file(&left)) + usize::from(is_file(&right));
+            if file_count == 2 {
+                return Err(BindError::new("cannot compare two value files"));
+            }
+            if file_count == 1
+                && !matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+            {
+                return Err(BindError::new(
+                    "value files support only equality comparisons",
+                ));
+            }
+            Ok(BoundExpression::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
         Expression::Function { name, arguments } => {
             let kind = bind_function(&name, arguments.len())?;
             Ok(BoundExpression::Function {
@@ -201,6 +216,10 @@ pub(crate) fn bind(
             })
         }
     }
+}
+
+fn is_file(expression: &BoundExpression) -> bool {
+    matches!(expression, BoundExpression::Value(BoundValue::File(_)))
 }
 
 fn bind_function(name: &str, argument_count: usize) -> Result<FunctionKind, BindError> {
@@ -243,7 +262,20 @@ fn bind_value(value: Value, header: &vcf::Header) -> Result<BoundValue, BindErro
         Value::Number(value) => Ok(BoundValue::Number(value)),
         Value::String(value) => Ok(BoundValue::String(value)),
         Value::Missing => Ok(BoundValue::Missing),
-        Value::File(path) => Ok(BoundValue::File(path)),
+        Value::File(path) => {
+            let source = fs::read_to_string(&path).map_err(|error| {
+                BindError::new(format!(
+                    "failed to read value file {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let values = source
+                .lines()
+                .filter_map(|line| line.split_ascii_whitespace().next())
+                .map(str::to_owned)
+                .collect();
+            Ok(BoundValue::File(values))
+        }
         Value::Field(field) => bind_field(field, header).map(BoundValue::Field),
     }
 }
