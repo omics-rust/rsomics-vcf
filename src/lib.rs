@@ -15,6 +15,7 @@ mod filter;
 mod format;
 mod query_bcf;
 mod query_format;
+mod regions;
 mod validation;
 mod variant_type;
 

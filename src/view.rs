@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::format::{Reader, Writer, reformat_record};
 
 pub use crate::format::{HeaderMode, OutputFormat};
-pub use regions::{OverlapMode, RegionSet};
+pub use crate::regions::{OverlapMode, RegionSet};
 pub use samples::SampleSelection;
 pub use selection::TypeSelection;
 
