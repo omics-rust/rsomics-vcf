@@ -1,4 +1,5 @@
 mod gaps;
+mod stream;
 
 use noodles_vcf::{
     self as vcf,
