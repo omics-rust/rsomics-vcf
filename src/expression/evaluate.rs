@@ -134,11 +134,11 @@ fn evaluate_node<'a>(
             }
         }
         BoundExpression::Function { kind, arguments } => {
-            let arguments = arguments
+            let evaluated_arguments = arguments
                 .iter()
                 .map(|argument| evaluate_node(argument, header, record))
                 .collect::<Result<_, _>>()?;
-            function::evaluate(*kind, arguments, record)
+            function::evaluate(*kind, evaluated_arguments, arguments, record)
         }
     }
 }
@@ -250,6 +250,9 @@ mod tests {
 ##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
 ##INFO=<ID=AF,Number=A,Type=Float,Description=\"frequency\">\n\
 ##INFO=<ID=B,Number=2,Type=Integer,Description=\"binomial counts\">\n\
+##INFO=<ID=DP4,Number=4,Type=Integer,Description=\"strand counts\">\n\
+##INFO=<ID=ADF,Number=R,Type=Integer,Description=\"forward allele depth\">\n\
+##INFO=<ID=ADR,Number=R,Type=Integer,Description=\"reverse allele depth\">\n\
 ##INFO=<ID=R,Number=R,Type=Integer,Description=\"allele values\">\n\
 ##INFO=<ID=M,Number=2,Type=Integer,Description=\"values with missing\">\n\
 ##INFO=<ID=Z,Number=2,Type=Integer,Description=\"zero counts\">\n\
@@ -257,11 +260,14 @@ mod tests {
 ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\">\n\
 ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
 ##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"allele depth\">\n\
+##FORMAT=<ID=DP4,Number=4,Type=Integer,Description=\"strand counts\">\n\
+##FORMAT=<ID=ADF,Number=R,Type=Integer,Description=\"forward allele depth\">\n\
+##FORMAT=<ID=ADR,Number=R,Type=Integer,Description=\"reverse allele depth\">\n\
 ##FORMAT=<ID=ST,Number=1,Type=String,Description=\"status\">\n\
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\n"
             .parse()
             .unwrap();
-        let line = b"chr1\t7\trs1;rs2\tA\tC,G\t50\tPASS\tDP=12;AF=0.1,0.9;B=3,5;R=1,2,3;M=1,.;Z=0,0\tGT:DP:AD:ST\t0/1:8:4,4,0:alpha\t1/2:.:0,3,5:BETA\t0/.:2:2,0,.:.";
+        let line = b"chr1\t7\trs1;rs2\tA\tC,G\t50\tPASS\tDP=12;AF=0.1,0.9;B=3,5;DP4=8,2,1,5;ADF=8,1,0;ADR=2,5,0;R=1,2,3;M=1,.;Z=0,0\tGT:DP:AD:DP4:ADF:ADR:ST\t0/1:8:4,4,0:8,2,1,5:8,2,0:1,5,0:alpha\t1/2:.:0,3,5:3,1,1,3:0,3,1:0,1,3:BETA\t0/.:2:2,0,.:8,2,1,.:2,0,.:1,0,.:.";
         let raw = vcf::Record::try_from(line.as_slice()).unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
         (header, record)
@@ -662,6 +668,60 @@ mod tests {
         assert_eq!(
             truth("BINOM(FMT/AD[:0], FMT/AD[:1]) > 0.2", &header, &record),
             Truth::samples(vec![true, true, true])
+        );
+    }
+
+    #[test]
+    fn fisher_supports_four_counts_paired_vectors_and_genotype_selection() {
+        let (header, record) = fixture();
+        for source in [
+            "FISHER(INFO/DP4) > 0.03 & FISHER(INFO/DP4) < 0.04",
+            "FISHER(INFO/ADF[0,1], INFO/ADR[0,1]) < 0.04",
+        ] {
+            assert_eq!(
+                truth(source, &header, &record),
+                Truth::site(true),
+                "{source}"
+            );
+        }
+        for source in [
+            "FISHER(FMT/DP4) < 0.04",
+            "FISHER(FMT/ADF[:0,1], FMT/ADR[:0,1]) < 0.04",
+            "FISHER(FMT/ADF, FMT/ADR) < 0.04",
+        ] {
+            assert_eq!(
+                truth(source, &header, &record),
+                Truth::samples(vec![true, false, false]),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn fisher_distinguishes_unindexed_number_r_from_explicit_pairs() {
+        let header: vcf::Header = "##fileformat=VCFv4.3\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\">\n\
+##FORMAT=<ID=ADF,Number=R,Type=Integer,Description=\"forward allele depth\">\n\
+##FORMAT=<ID=ADR,Number=R,Type=Integer,Description=\"reverse allele depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
+            .parse()
+            .unwrap();
+        let raw = vcf::Record::try_from(
+            b"chr1\t7\t.\tA\tC\t.\tPASS\t.\tGT:ADF:ADR\t0/0:8,2:1,5".as_slice(),
+        )
+        .unwrap();
+        let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
+        assert_eq!(
+            truth("FISHER(FMT/ADF, FMT/ADR) = 1", &header, &record),
+            Truth::samples(vec![true])
+        );
+        assert_eq!(
+            truth(
+                "FISHER(FMT/ADF[:0,1], FMT/ADR[:0,1]) < 0.04",
+                &header,
+                &record
+            ),
+            Truth::samples(vec![true])
         );
     }
 

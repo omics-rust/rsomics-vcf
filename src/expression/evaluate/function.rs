@@ -1,5 +1,5 @@
 use crate::expression::{
-    bind::FunctionKind,
+    bind::{BoundExpression, FunctionKind},
     value::{Atom, Filter, Values},
 };
 use noodles_vcf::variant::RecordBuf;
@@ -7,18 +7,25 @@ use noodles_vcf::variant::RecordBuf;
 use super::{EvaluateError, Evaluated};
 
 mod binomial;
+mod fisher;
 
 pub(super) fn evaluate<'a>(
     kind: FunctionKind,
     mut arguments: Vec<Evaluated<'a>>,
+    expressions: &[BoundExpression],
     record: &RecordBuf,
 ) -> Result<Evaluated<'a>, EvaluateError> {
-    if kind == FunctionKind::Binomial {
+    if matches!(kind, FunctionKind::Binomial | FunctionKind::Fisher) {
         let arguments = arguments
             .into_iter()
             .map(super::require_values)
             .collect::<Result<_, _>>()?;
-        return binomial::evaluate(arguments, record).map(Evaluated::Values);
+        let values = match kind {
+            FunctionKind::Binomial => binomial::evaluate(arguments, record),
+            FunctionKind::Fisher => fisher::evaluate(arguments, expressions, record),
+            _ => unreachable!(),
+        }?;
+        return Ok(Evaluated::Values(values));
     }
     if arguments.len() != 1 {
         return Err(EvaluateError::new(
@@ -54,6 +61,22 @@ pub(super) fn evaluate<'a>(
         (_, Evaluated::Truth(_)) => Err(EvaluateError::new(
             "function requires values rather than a truth expression",
         )),
+    }
+}
+
+fn numeric_count(value: &Atom<'_>, function: &str) -> Result<Option<i32>, EvaluateError> {
+    match value {
+        Atom::Absent | Atom::Missing => Ok(None),
+        Atom::Number(value) if value.is_finite() && *value >= 0.0 && *value <= i32::MAX as f64 => {
+            Ok(Some(*value as i32))
+        }
+        Atom::Flag => Ok(Some(1)),
+        Atom::Number(_) => Err(EvaluateError::new(format!(
+            "{function} counts must be finite nonnegative 32-bit values"
+        ))),
+        _ => Err(EvaluateError::new(format!(
+            "{function} received a nonnumeric value"
+        ))),
     }
 }
 

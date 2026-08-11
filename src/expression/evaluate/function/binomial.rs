@@ -2,7 +2,10 @@ use noodles_vcf::variant::RecordBuf;
 
 use crate::expression::value::{self, Atom, SampleValues, Values};
 
-use super::super::{EvaluateError, sample_width};
+use super::{
+    super::{EvaluateError, sample_width},
+    numeric_count,
+};
 
 pub(super) fn evaluate<'a>(
     mut arguments: Vec<Values<'a>>,
@@ -116,26 +119,15 @@ fn two<'a>(left: Values<'a>, right: Values<'a>) -> Result<Values<'a>, EvaluateEr
 }
 
 fn probability<'a>(left: &Atom<'_>, right: &Atom<'_>) -> Result<Atom<'a>, EvaluateError> {
-    let (Some(left), Some(right)) = (count(left)?, count(right)?) else {
+    let (Some(left), Some(right)) = (
+        numeric_count(left, "BINOM")?,
+        numeric_count(right, "BINOM")?,
+    ) else {
         return Ok(Atom::Missing);
     };
     Ok(binomial_two_sided(left, right)
         .map(Atom::Number)
         .unwrap_or(Atom::Missing))
-}
-
-fn count(value: &Atom<'_>) -> Result<Option<i32>, EvaluateError> {
-    match value {
-        Atom::Absent | Atom::Missing => Ok(None),
-        Atom::Number(value) if value.is_finite() && *value >= 0.0 && *value <= i32::MAX as f64 => {
-            Ok(Some(*value as i32))
-        }
-        Atom::Flag => Ok(Some(1)),
-        Atom::Number(_) => Err(EvaluateError::new(
-            "BINOM counts must be finite nonnegative 32-bit values",
-        )),
-        _ => Err(EvaluateError::new("BINOM received a nonnumeric value")),
-    }
 }
 
 fn binomial_two_sided(left: i32, right: i32) -> Option<f64> {
