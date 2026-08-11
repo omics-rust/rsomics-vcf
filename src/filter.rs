@@ -15,7 +15,23 @@ use noodles_vcf::{
 };
 use rsomics_common::{Result, RsomicsError};
 
-use crate::expression::Compiled;
+use crate::{expression::Compiled, regions::RegionSet};
+
+#[derive(Clone, Debug)]
+pub(crate) struct Mask {
+    regions: RegionSet,
+    negate: bool,
+}
+
+impl Mask {
+    pub(crate) fn new(regions: RegionSet, negate: bool) -> Self {
+        Self { regions, negate }
+    }
+
+    fn passes(&self, record: &RecordBuf) -> bool {
+        self.regions.matches(record) == self.negate
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Logic {
@@ -52,9 +68,10 @@ impl AnnotationMode {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Options {
     pub logic: Logic,
+    pub mask: Option<Mask>,
     pub soft_filter: Option<String>,
     pub mode: AnnotationMode,
     pub set_genotypes: Option<GenotypeReplacement>,
@@ -99,9 +116,10 @@ impl Decision {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Program {
-    expression: Compiled,
+    expression: Option<Compiled>,
+    mask: Option<Mask>,
     logic: Logic,
     failure_filter: Option<String>,
     mode: AnnotationMode,
@@ -109,15 +127,41 @@ pub(crate) struct Program {
 }
 
 impl Program {
-    pub(crate) fn bind(header: &mut vcf::Header, source: &str, options: Options) -> Result<Self> {
-        let expression = Compiled::bind(source, header).map_err(|error| {
-            RsomicsError::ConfigError(format!("invalid filter expression: {error}"))
-        })?;
+    pub(crate) fn bind(
+        header: &mut vcf::Header,
+        source: Option<&str>,
+        options: Options,
+    ) -> Result<Self> {
+        if source.is_none() && options.mask.is_none() {
+            return Err(RsomicsError::ConfigError(
+                "filter requires an expression or mask".to_owned(),
+            ));
+        }
+        if options.mask.is_some() && options.soft_filter.is_none() {
+            return Err(RsomicsError::ConfigError(
+                "mask requires a soft filter".to_owned(),
+            ));
+        }
+        let expression = source
+            .map(|source| {
+                Compiled::bind(source, header).map_err(|error| {
+                    RsomicsError::ConfigError(format!("invalid filter expression: {error}"))
+                })
+            })
+            .transpose()?;
+        let description = source.map_or_else(
+            || "Record masked by region".to_owned(),
+            |source| match options.logic {
+                Logic::Include => format!("Set if not true: {source}"),
+                Logic::Exclude => format!("Set if true: {source}"),
+            },
+        );
         let failure_filter = options
             .soft_filter
-            .map(|name| register_filter(header, name, source, options.logic));
+            .map(|name| register_filter(header, name, description));
         Ok(Self {
             expression,
+            mask: options.mask,
             logic: options.logic,
             failure_filter,
             mode: options.mode,
@@ -135,16 +179,24 @@ impl Program {
         record: &mut RecordBuf,
         retain_failed: RetainFailed,
     ) -> Result<Decision> {
-        let truth = self.expression.evaluate(header, record).map_err(|error| {
-            RsomicsError::InvalidInput(format!("evaluating filter expression: {error}"))
-        })?;
-        let site_passes = self.logic.accepts(truth.site_passes());
-        let sample_passes = truth.sample_passes().map(|passes| {
-            passes
-                .iter()
-                .map(|passes| self.logic.accepts(*passes))
-                .collect()
-        });
+        let (expression_passes, sample_passes) = if let Some(expression) = &self.expression {
+            let truth = expression.evaluate(header, record).map_err(|error| {
+                RsomicsError::InvalidInput(format!("evaluating filter expression: {error}"))
+            })?;
+            (
+                self.logic.accepts(truth.site_passes()),
+                truth.sample_passes().map(|passes| {
+                    passes
+                        .iter()
+                        .map(|passes| self.logic.accepts(*passes))
+                        .collect::<Vec<_>>()
+                }),
+            )
+        } else {
+            (true, None)
+        };
+        let mask_passes = self.mask.as_ref().is_none_or(|mask| mask.passes(record));
+        let site_passes = expression_passes && mask_passes;
 
         if site_passes {
             if self.mode.resets_passed() || record.filters().as_ref().is_empty() {
@@ -299,12 +351,7 @@ fn adjust_an(an: &mut Option<i32>, difference: i32) -> Result<()> {
     Ok(())
 }
 
-fn register_filter(
-    header: &mut vcf::Header,
-    requested: String,
-    source: &str,
-    logic: Logic,
-) -> String {
+fn register_filter(header: &mut vcf::Header, requested: String, description: String) -> String {
     let name = if requested == "+" {
         (1..)
             .map(|index| format!("Filter{index}"))
@@ -312,10 +359,6 @@ fn register_filter(
             .unwrap()
     } else {
         requested
-    };
-    let description = match logic {
-        Logic::Include => format!("Set if not true: {source}"),
-        Logic::Exclude => format!("Set if true: {source}"),
     };
     header
         .filters_mut()
@@ -338,6 +381,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::regions::OverlapMode;
 
     fn fixture() -> (vcf::Header, RecordBuf) {
         let header: vcf::Header = "##fileformat=VCFv4.3\n\
@@ -366,6 +410,15 @@ mod tests {
             .parse()
             .unwrap();
         let record = vcf::Record::try_from(record).unwrap();
+        let record = RecordBuf::try_from_variant_record(&header, &record).unwrap();
+        (header, record)
+    }
+
+    fn variant_fixture() -> (vcf::Header, RecordBuf) {
+        let (header, _) = fixture();
+        let record =
+            vcf::Record::try_from(b"chr1\t10\t.\tAACGT\tAATGT\t10\tPASS\t.\tDP\t8\t20".as_slice())
+                .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &record).unwrap();
         (header, record)
     }
@@ -407,7 +460,7 @@ mod tests {
         let (mut header, record) = fixture();
         let include = Program::bind(
             &mut header,
-            "QUAL >= 20",
+            Some("QUAL >= 20"),
             Options {
                 logic: Logic::Include,
                 ..Options::default()
@@ -423,7 +476,7 @@ mod tests {
 
         let exclude = Program::bind(
             &mut header,
-            "QUAL < 20",
+            Some("QUAL < 20"),
             Options {
                 logic: Logic::Exclude,
                 ..Options::default()
@@ -447,7 +500,7 @@ mod tests {
         let (mut header, record) = fixture();
         let include = Program::bind(
             &mut header,
-            "FMT/DP >= 10",
+            Some("FMT/DP >= 10"),
             Options {
                 logic: Logic::Include,
                 ..Options::default()
@@ -462,7 +515,7 @@ mod tests {
 
         let exclude = Program::bind(
             &mut header,
-            "FMT/DP >= 10",
+            Some("FMT/DP >= 10"),
             Options {
                 logic: Logic::Exclude,
                 ..Options::default()
@@ -481,7 +534,7 @@ mod tests {
         let (mut header, record) = fixture();
         let replace = Program::bind(
             &mut header,
-            "QUAL >= 20",
+            Some("QUAL >= 20"),
             Options {
                 soft_filter: Some("ExprFail".to_owned()),
                 ..Options::default()
@@ -500,7 +553,7 @@ mod tests {
 
         let add = Program::bind(
             &mut header,
-            "QUAL >= 20",
+            Some("QUAL >= 20"),
             Options {
                 soft_filter: Some("Added".to_owned()),
                 mode: AnnotationMode::Add,
@@ -517,7 +570,7 @@ mod tests {
 
         let reset = Program::bind(
             &mut header,
-            "QUAL >= 5",
+            Some("QUAL >= 5"),
             Options {
                 soft_filter: Some("Unused".to_owned()),
                 mode: AnnotationMode::ResetPassed,
@@ -531,7 +584,7 @@ mod tests {
 
         let add_and_reset = Program::bind(
             &mut header,
-            "QUAL >= 5",
+            Some("QUAL >= 5"),
             Options {
                 soft_filter: Some("Unused2".to_owned()),
                 mode: AnnotationMode::AddAndResetPassed,
@@ -551,7 +604,7 @@ mod tests {
         let (mut header, _) = fixture();
         let program = Program::bind(
             &mut header,
-            "QUAL >= 20",
+            Some("QUAL >= 20"),
             Options {
                 soft_filter: Some("+".to_owned()),
                 ..Options::default()
@@ -568,7 +621,7 @@ mod tests {
             genotype_fixture(b"chr1\t1\t.\tA\tC,G\t10\tPASS\tAC=4,3;AN=10\tGT:DP\t0|1:8\t2/2:20");
         let program = Program::bind(
             &mut header,
-            "FMT/DP >= 10",
+            Some("FMT/DP >= 10"),
             Options {
                 set_genotypes: Some(GenotypeReplacement::Missing),
                 ..Options::default()
@@ -591,7 +644,7 @@ mod tests {
             genotype_fixture(b"chr1\t1\t.\tA\tC,G\t10\tPASS\tAC=4,3;AN=10\tGT:DP\t./2:8\t1/1:20");
         let program = Program::bind(
             &mut header,
-            "FMT/DP >= 10",
+            Some("FMT/DP >= 10"),
             Options {
                 set_genotypes: Some(GenotypeReplacement::Reference),
                 ..Options::default()
@@ -614,7 +667,7 @@ mod tests {
         let original_info = record.info().clone();
         let program = Program::bind(
             &mut header,
-            "FMT/DP >= 10",
+            Some("FMT/DP >= 10"),
             Options {
                 set_genotypes: Some(GenotypeReplacement::Missing),
                 ..Options::default()
@@ -634,7 +687,7 @@ mod tests {
             genotype_fixture(b"chr1\t1\t.\tA\tC\t10\tPASS\tAC=3;AN=4\tGT:DP\t0/1:8\t1/1:20");
         let program = Program::bind(
             &mut header,
-            "QUAL >= 20",
+            Some("QUAL >= 20"),
             Options {
                 set_genotypes: Some(GenotypeReplacement::Missing),
                 ..Options::default()
@@ -648,5 +701,159 @@ mod tests {
         assert_eq!(genotype(&record, 1), [None, None]);
         assert_eq!(integer_array_info(&record, "AC"), [Some(0)]);
         assert_eq!(integer_info(&record, "AN"), Some(0));
+    }
+
+    #[test]
+    fn mask_only_failure_rewrites_every_sample() {
+        let (mut header, mut record) =
+            genotype_fixture(b"chr1\t1\t.\tA\tC\t10\tPASS\tAC=3;AN=4\tGT:DP\t0/1:8\t1/1:20");
+        let regions = RegionSet::parse(["chr1:1-1".to_owned()], OverlapMode::Position).unwrap();
+        let program = Program::bind(
+            &mut header,
+            None,
+            Options {
+                mask: Some(Mask::new(regions, false)),
+                soft_filter: Some("Masked".to_owned()),
+                set_genotypes: Some(GenotypeReplacement::Missing),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let decision = program
+            .apply(&header, &mut record, RetainFailed::No)
+            .unwrap();
+        assert!(!decision.site_passes());
+        assert!(decision.sample_passes().is_none());
+        assert_eq!(genotype(&record, 0), [None, None]);
+        assert_eq!(genotype(&record, 1), [None, None]);
+        assert_eq!(integer_array_info(&record, "AC"), [Some(0)]);
+        assert_eq!(integer_info(&record, "AN"), Some(0));
+    }
+
+    #[test]
+    fn masks_share_position_record_and_variant_overlap_semantics() {
+        let cases = [
+            (OverlapMode::Position, "chr1:10-10", false),
+            (OverlapMode::Position, "chr1:14-14", true),
+            (OverlapMode::Record, "chr1:14-14", false),
+            (OverlapMode::Record, "chr1:15-15", true),
+            (OverlapMode::Variant, "chr1:10-10", true),
+            (OverlapMode::Variant, "chr1:14-14", false),
+            (OverlapMode::Variant, "chr1:12-12", false),
+        ];
+        for (overlap, region, expected) in cases {
+            let (mut header, mut record) = variant_fixture();
+            let regions = RegionSet::parse([region.to_owned()], overlap).unwrap();
+            let program = Program::bind(
+                &mut header,
+                None,
+                Options {
+                    mask: Some(Mask::new(regions, false)),
+                    soft_filter: Some("Masked".to_owned()),
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            let decision = program
+                .apply(&header, &mut record, RetainFailed::No)
+                .unwrap();
+            assert_eq!(decision.site_passes(), expected, "{overlap:?} {region}");
+        }
+    }
+
+    #[test]
+    fn negated_masks_and_expressions_both_must_pass() {
+        let (mut header, record) = fixture();
+        let regions = RegionSet::parse(["chr1:1-1".to_owned()], OverlapMode::Position).unwrap();
+        let expression_passes = Program::bind(
+            &mut header,
+            Some("FMT/DP >= 10"),
+            Options {
+                mask: Some(Mask::new(regions.clone(), false)),
+                soft_filter: Some("Masked".to_owned()),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let mut masked = record.clone();
+        let decision = expression_passes
+            .apply(&header, &mut masked, RetainFailed::No)
+            .unwrap();
+        assert!(!decision.site_passes());
+        assert_eq!(decision.sample_passes(), Some(&[false, true][..]));
+
+        let expression_fails = Program::bind(
+            &mut header,
+            Some("QUAL >= 20"),
+            Options {
+                mask: Some(Mask::new(regions.clone(), true)),
+                soft_filter: Some("ExprFail".to_owned()),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let mut failed = record.clone();
+        assert!(
+            !expression_fails
+                .apply(&header, &mut failed, RetainFailed::No)
+                .unwrap()
+                .site_passes()
+        );
+
+        let both_pass = Program::bind(
+            &mut header,
+            Some("QUAL >= 5"),
+            Options {
+                mask: Some(Mask::new(regions, true)),
+                soft_filter: Some("Unused".to_owned()),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let mut passed = record;
+        assert!(
+            both_pass
+                .apply(&header, &mut passed, RetainFailed::No)
+                .unwrap()
+                .site_passes()
+        );
+    }
+
+    #[test]
+    fn masks_require_soft_filters_and_mask_only_headers_are_explicit() {
+        let (mut header, _) = fixture();
+        let error = Program::bind(&mut header, None, Options::default()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("filter requires an expression or mask")
+        );
+
+        let regions = RegionSet::parse(["chr1:1-1".to_owned()], OverlapMode::Position).unwrap();
+        let error = Program::bind(
+            &mut header,
+            None,
+            Options {
+                mask: Some(Mask::new(regions.clone(), false)),
+                ..Options::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("mask requires a soft filter"));
+
+        Program::bind(
+            &mut header,
+            None,
+            Options {
+                mask: Some(Mask::new(regions, false)),
+                soft_filter: Some("Masked".to_owned()),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            header.filters().get("Masked").unwrap().description(),
+            "Record masked by region"
+        );
     }
 }
