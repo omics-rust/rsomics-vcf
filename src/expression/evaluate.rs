@@ -23,8 +23,12 @@ impl Truth {
     }
 
     fn samples(values: Vec<bool>) -> Self {
+        Self::with_samples(values.iter().any(|value| *value), values)
+    }
+
+    fn with_samples(site: bool, values: Vec<bool>) -> Self {
         Self {
-            site: values.iter().any(|value| *value),
+            site,
             samples: Some(values),
         }
     }
@@ -94,10 +98,11 @@ fn evaluate_node<'a>(
             } else if operator.is_comparison() {
                 compare(require_values(left)?, require_values(right)?, *operator)
                     .map(Evaluated::Truth)
+            } else if operator.is_logical() {
+                logical(require_truth(left)?, require_truth(right)?, *operator)
+                    .map(Evaluated::Truth)
             } else {
-                Err(EvaluateError::new(
-                    "logical expression evaluation is not implemented",
-                ))
+                Err(EvaluateError::new("operator is not implemented"))
             }
         }
         BoundExpression::Function { .. } => Err(EvaluateError::new(
@@ -140,6 +145,99 @@ fn require_values(value: Evaluated<'_>) -> Result<Values<'_>, EvaluateError> {
         Evaluated::Truth(_) => Err(EvaluateError::new(
             "truth value cannot be used as an arithmetic operand",
         )),
+    }
+}
+
+fn require_truth(value: Evaluated<'_>) -> Result<Truth, EvaluateError> {
+    match value {
+        Evaluated::Truth(truth) => Ok(truth),
+        Evaluated::Values(_) => Err(EvaluateError::new(
+            "value cannot be used as a logical operand",
+        )),
+    }
+}
+
+fn logical(left: Truth, right: Truth, operator: BinaryOperator) -> Result<Truth, EvaluateError> {
+    let sample_count = logical_sample_count(&left, &right)?;
+    match operator {
+        BinaryOperator::SampleAnd | BinaryOperator::SiteAnd => {
+            if !left.site || !right.site {
+                return Ok(sample_count
+                    .map(|count| Truth::with_samples(false, vec![false; count]))
+                    .unwrap_or_else(|| Truth::site(false)));
+            }
+            match (left.samples, right.samples) {
+                (None, None) => Ok(Truth::site(true)),
+                (Some(samples), None) | (None, Some(samples)) => {
+                    Ok(Truth::with_samples(true, samples))
+                }
+                (Some(left), Some(right)) => {
+                    let samples = left
+                        .iter()
+                        .zip(right)
+                        .map(|(left, right)| match operator {
+                            BinaryOperator::SampleAnd => *left && right,
+                            BinaryOperator::SiteAnd => *left || right,
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    Ok(match operator {
+                        BinaryOperator::SampleAnd => Truth::samples(samples),
+                        BinaryOperator::SiteAnd => Truth::with_samples(true, samples),
+                        _ => unreachable!(),
+                    })
+                }
+            }
+        }
+        BinaryOperator::SampleOr | BinaryOperator::SiteOr => {
+            if !left.site && !right.site {
+                return Ok(sample_count
+                    .map(|count| Truth::with_samples(false, vec![false; count]))
+                    .unwrap_or_else(|| Truth::site(false)));
+            }
+            match (left.samples, right.samples) {
+                (None, None) => Ok(Truth::site(true)),
+                (Some(samples), None) => {
+                    if operator == BinaryOperator::SiteOr && right.site {
+                        Ok(Truth::with_samples(true, vec![true; samples.len()]))
+                    } else {
+                        Ok(Truth::with_samples(true, samples))
+                    }
+                }
+                (None, Some(samples)) => {
+                    if operator == BinaryOperator::SiteOr && left.site {
+                        Ok(Truth::with_samples(true, vec![true; samples.len()]))
+                    } else {
+                        Ok(Truth::with_samples(true, samples))
+                    }
+                }
+                (Some(left), Some(right)) => {
+                    if operator == BinaryOperator::SiteOr {
+                        Ok(Truth::with_samples(true, vec![true; left.len()]))
+                    } else {
+                        let samples = left
+                            .into_iter()
+                            .zip(right)
+                            .map(|(left, right)| left || right)
+                            .collect();
+                        Ok(Truth::with_samples(true, samples))
+                    }
+                }
+            }
+        }
+        _ => Err(EvaluateError::new("operator is not logical")),
+    }
+}
+
+fn logical_sample_count(left: &Truth, right: &Truth) -> Result<Option<usize>, EvaluateError> {
+    match (&left.samples, &right.samples) {
+        (Some(left), Some(right)) if left.len() != right.len() => Err(EvaluateError::new(format!(
+            "incompatible sample counts in logical expression: {} vs {}",
+            left.len(),
+            right.len()
+        ))),
+        (Some(samples), _) | (_, Some(samples)) => Ok(Some(samples.len())),
+        (None, None) => Ok(None),
     }
 }
 
@@ -467,6 +565,7 @@ fn sample_width(samples: &[Vec<Atom<'_>>]) -> usize {
 trait OperatorKind {
     fn is_arithmetic(&self) -> bool;
     fn is_comparison(&self) -> bool;
+    fn is_logical(&self) -> bool;
 }
 
 impl OperatorKind for BinaryOperator {
@@ -486,6 +585,13 @@ impl OperatorKind for BinaryOperator {
                 | Self::LessEqual
                 | Self::Greater
                 | Self::GreaterEqual
+        )
+    }
+
+    fn is_logical(&self) -> bool {
+        matches!(
+            self,
+            Self::SampleAnd | Self::SiteAnd | Self::SampleOr | Self::SiteOr
         )
     }
 }
@@ -577,5 +683,59 @@ mod tests {
         let (header, record) = fixture();
         let expression = bind(parse("AF + R > 0").unwrap(), &header).unwrap();
         assert!(evaluate(&expression, &header, &record).is_err());
+    }
+
+    #[test]
+    fn logical_operators_keep_sample_and_site_semantics_distinct() {
+        let (header, record) = fixture();
+        let first = "FMT/DP >= 8";
+        let second = "FMT/AD > 4";
+        assert_eq!(
+            truth(&format!("{first} & {second}"), &header, &record),
+            Truth::samples(vec![false, false, false])
+        );
+        assert_eq!(
+            truth(&format!("{first} && {second}"), &header, &record),
+            Truth::samples(vec![true, true, false])
+        );
+        assert_eq!(
+            truth(&format!("{first} | {second}"), &header, &record),
+            Truth::samples(vec![true, true, false])
+        );
+        assert_eq!(
+            truth(&format!("{first} || {second}"), &header, &record),
+            Truth::samples(vec![true, true, true])
+        );
+    }
+
+    #[test]
+    fn site_truth_controls_mixed_logical_sample_masks() {
+        let (header, record) = fixture();
+        let sample = "FMT/DP >= 8";
+        for operator in ["&", "&&"] {
+            assert_eq!(
+                truth(&format!("QUAL > 40 {operator} {sample}"), &header, &record,),
+                Truth::samples(vec![true, false, false])
+            );
+            assert_eq!(
+                truth(&format!("QUAL < 40 {operator} {sample}"), &header, &record,),
+                Truth::samples(vec![false, false, false])
+            );
+        }
+        assert_eq!(
+            truth("QUAL > 40 | FMT/DP < 0", &header, &record),
+            Truth {
+                site: true,
+                samples: Some(vec![false, false, false]),
+            }
+        );
+        assert_eq!(
+            truth("QUAL > 40 || FMT/DP < 0", &header, &record),
+            Truth::samples(vec![true, true, true])
+        );
+        assert_eq!(
+            truth("QUAL < 40 || FMT/DP >= 8", &header, &record),
+            Truth::samples(vec![true, false, false])
+        );
     }
 }
