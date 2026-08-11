@@ -8,6 +8,8 @@ pub mod view;
 
 mod cli;
 mod commands;
+#[cfg(test)]
+mod expression;
 mod format;
 mod query_bcf;
 mod query_format;
