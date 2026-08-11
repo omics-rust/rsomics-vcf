@@ -9,6 +9,7 @@ use noodles_vcf::{self as vcf, variant::RecordBuf};
 
 mod arithmetic;
 mod comparison;
+mod function;
 mod logical;
 mod select;
 
@@ -113,9 +114,15 @@ fn evaluate_node<'a>(
                 Err(EvaluateError::new("operator is not implemented"))
             }
         }
-        BoundExpression::Function { .. } => Err(EvaluateError::new(
-            "function expression evaluation is not implemented",
-        )),
+        BoundExpression::Function { kind, arguments } => {
+            let [argument] = arguments.as_slice() else {
+                return Err(EvaluateError::new(
+                    "function evaluation for this arity is not implemented",
+                ));
+            };
+            let argument = require_values(evaluate_node(argument, header, record)?)?;
+            function::reduce(*kind, argument).map(Evaluated::Values)
+        }
     }
 }
 
@@ -464,6 +471,60 @@ mod tests {
         assert_eq!(
             evaluate(&expression, &header, &record).unwrap(),
             Truth::samples(vec![false, false, true])
+        );
+    }
+
+    #[test]
+    fn global_numeric_functions_reduce_sites_and_selected_samples() {
+        let (header, record) = fixture();
+        for source in [
+            "MAX(AF) = 0.9",
+            "MIN(AF) = 0.1",
+            "SUM(AF) = 1",
+            "MEAN(AF) = 0.5",
+            "AVG(AF) = 0.5",
+            "MEDIAN(AF) = 0.5",
+            "STDEV(AF) > 0.39 & STDEV(AF) < 0.41",
+            "STDEV(INFO/DP) = 0",
+            "SUM(FMT/AD) = 18",
+            "MAX(FMT/AD) = 5",
+            "SUM(FMT/AD[0]) = 8",
+            "SUM(X) = '.'",
+        ] {
+            assert_eq!(
+                truth(source, &header, &record),
+                Truth::site(true),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn sample_numeric_functions_reduce_each_selected_sample() {
+        let (header, record) = fixture();
+        assert_eq!(
+            truth("SMPL_SUM(FMT/AD) = 8", &header, &record),
+            Truth::samples(vec![true, true, false])
+        );
+        assert_eq!(
+            truth("sMEAN(FMT/AD) > 2", &header, &record),
+            Truth::samples(vec![true, true, false])
+        );
+        assert_eq!(
+            truth("SMPL_MEDIAN(FMT/AD) > 2", &header, &record),
+            Truth::samples(vec![true, true, false])
+        );
+        assert_eq!(
+            truth("sSTDEV(FMT/AD) > 2", &header, &record),
+            Truth::samples(vec![false, true, false])
+        );
+        assert_eq!(
+            truth("SMPL_SUM(FMT/AD[0]) = 8", &header, &record),
+            Truth::samples(vec![true, false, false])
+        );
+        assert_eq!(
+            truth("SMPL_SUM(FMT/DP) = '.'", &header, &record),
+            Truth::samples(vec![false, true, false])
         );
     }
 }

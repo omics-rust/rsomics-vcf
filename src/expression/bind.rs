@@ -23,9 +23,34 @@ pub(crate) enum BoundExpression {
         right: Box<Self>,
     },
     Function {
-        name: String,
+        kind: FunctionKind,
         arguments: Vec<Self>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FunctionKind {
+    Max,
+    Min,
+    Mean,
+    Median,
+    StandardDeviation,
+    Sum,
+    SampleMax,
+    SampleMin,
+    SampleMean,
+    SampleMedian,
+    SampleStandardDeviation,
+    SampleSum,
+    Absolute,
+    Count,
+    SampleCount,
+    StringLength,
+    Binomial,
+    Fisher,
+    Phred,
+    PassingSampleCount,
+    PassingSampleFraction,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,13 +190,51 @@ pub(crate) fn bind(
             left: Box::new(bind(*left, header)?),
             right: Box::new(bind(*right, header)?),
         }),
-        Expression::Function { name, arguments } => Ok(BoundExpression::Function {
-            name: name.to_ascii_uppercase(),
-            arguments: arguments
-                .into_iter()
-                .map(|argument| bind(argument, header))
-                .collect::<Result<_, _>>()?,
-        }),
+        Expression::Function { name, arguments } => {
+            let kind = bind_function(&name, arguments.len())?;
+            Ok(BoundExpression::Function {
+                kind,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| bind(argument, header))
+                    .collect::<Result<_, _>>()?,
+            })
+        }
+    }
+}
+
+fn bind_function(name: &str, argument_count: usize) -> Result<FunctionKind, BindError> {
+    let upper = name.to_ascii_uppercase();
+    let (kind, arity) = match upper.as_str() {
+        "MAX" => (FunctionKind::Max, 1..=1),
+        "MIN" => (FunctionKind::Min, 1..=1),
+        "AVG" | "MEAN" => (FunctionKind::Mean, 1..=1),
+        "MEDIAN" => (FunctionKind::Median, 1..=1),
+        "STDEV" => (FunctionKind::StandardDeviation, 1..=1),
+        "SUM" => (FunctionKind::Sum, 1..=1),
+        "SMPL_MAX" | "SMAX" => (FunctionKind::SampleMax, 1..=1),
+        "SMPL_MIN" | "SMIN" => (FunctionKind::SampleMin, 1..=1),
+        "SMPL_AVG" | "SMPL_MEAN" | "SAVG" | "SMEAN" => (FunctionKind::SampleMean, 1..=1),
+        "SMPL_MEDIAN" | "SMEDIAN" => (FunctionKind::SampleMedian, 1..=1),
+        "SMPL_STDEV" | "SSTDEV" => (FunctionKind::SampleStandardDeviation, 1..=1),
+        "SMPL_SUM" | "SSUM" => (FunctionKind::SampleSum, 1..=1),
+        "ABS" => (FunctionKind::Absolute, 1..=1),
+        "COUNT" => (FunctionKind::Count, 1..=1),
+        "SMPL_COUNT" | "SCOUNT" => (FunctionKind::SampleCount, 1..=1),
+        "STRLEN" => (FunctionKind::StringLength, 1..=1),
+        "BINOM" => (FunctionKind::Binomial, 0..=2),
+        "FISHER" => (FunctionKind::Fisher, 1..=2),
+        "PHRED" => (FunctionKind::Phred, 1..=1),
+        "N_PASS" => (FunctionKind::PassingSampleCount, 1..=1),
+        "F_PASS" => (FunctionKind::PassingSampleFraction, 1..=1),
+        _ => return Err(BindError::new(format!("unknown function {name}"))),
+    };
+    if arity.contains(&argument_count) {
+        Ok(kind)
+    } else {
+        Err(BindError::new(format!(
+            "function {name} does not accept {argument_count} arguments"
+        )))
     }
 }
 
@@ -576,12 +639,15 @@ mod tests {
 
     #[test]
     fn function_names_are_bound_case_insensitively() {
-        let BoundExpression::Function { name, arguments } =
+        let BoundExpression::Function { kind, arguments } =
             bind(parse("smpl_mean(FMT/AD)").unwrap(), &header()).unwrap()
         else {
             panic!("expected function");
         };
-        assert_eq!(name, "SMPL_MEAN");
+        assert_eq!(kind, FunctionKind::SampleMean);
         assert_eq!(arguments.len(), 1);
+        for source in ["unknown(AF)", "MAX()", "SUM(AF, R)", "FISHER()"] {
+            assert!(bind(parse(source).unwrap(), &header()).is_err(), "{source}");
+        }
     }
 }
