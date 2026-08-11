@@ -1,6 +1,11 @@
+use std::fs::File;
+use std::path::{Path, PathBuf};
+
+use noodles_bgzf as bgzf;
 use noodles_core::{Position, Region, region::Interval};
+use noodles_util::variant::io::indexed_reader;
 use noodles_vcf::variant::{RecordBuf, record::info::field::key, record_buf::info::field::Value};
-use rsomics_common::{Result, RsomicsError};
+use rsomics_common::{Context, Result, RsomicsError};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OverlapMode {
@@ -20,6 +25,80 @@ pub struct RegionSet {
 pub struct RegionSelection {
     regions: RegionSet,
     exclude: bool,
+}
+
+pub(crate) struct IndexedRecords {
+    reader: indexed_reader::IndexedReader<bgzf::io::Reader<File>>,
+    header: noodles_vcf::Header,
+    regions: Vec<Region>,
+    overlap: OverlapMode,
+    input: PathBuf,
+}
+
+impl IndexedRecords {
+    pub(crate) fn open(input: &Path, regions: &RegionSet) -> Result<Self> {
+        let mut reader = indexed_reader::Builder::default()
+            .build_from_path(input)
+            .rs_with_context(|| format!("opening indexed variant input {}", input.display()))?;
+        let header = reader
+            .read_header()
+            .rs_with_context(|| format!("reading variant header {}", input.display()))?;
+        let query_regions = regions.merged(&header)?;
+        Ok(Self {
+            reader,
+            header,
+            regions: query_regions,
+            overlap: regions.overlap(),
+            input: input.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn header(&self) -> &noodles_vcf::Header {
+        &self.header
+    }
+
+    pub(crate) fn visit(
+        &mut self,
+        mut visit: impl FnMut(&noodles_vcf::Header, RecordBuf, u64) -> Result<()>,
+    ) -> Result<u64> {
+        let Self {
+            reader,
+            header,
+            regions,
+            overlap,
+            input,
+        } = self;
+        let mut read = 0;
+        for (region_index, region) in regions.iter().enumerate() {
+            let records = reader
+                .query(header, region)
+                .rs_with_context(|| format!("querying region {region}"))?;
+            for result in records {
+                let number = read + 1;
+                let record = result
+                    .rs_with_context(|| format!("reading indexed variant record {number}"))?;
+                let record = RecordBuf::try_from_variant_record(header, record.as_ref()).map_err(
+                    |error| {
+                        RsomicsError::InvalidInput(format!(
+                            "{}: decoding indexed variant record {number}: {error}",
+                            input.display()
+                        ))
+                    },
+                )?;
+                read += 1;
+                if !overlaps(&record, region.interval(), *overlap)
+                    || regions[..region_index].iter().any(|previous| {
+                        previous.name() == region.name()
+                            && overlaps(&record, previous.interval(), *overlap)
+                    })
+                {
+                    continue;
+                }
+                visit(header, record, number)?;
+            }
+        }
+        Ok(read)
+    }
 }
 
 impl RegionSelection {
