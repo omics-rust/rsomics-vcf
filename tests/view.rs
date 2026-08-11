@@ -167,6 +167,34 @@ fn targets_stream_and_header_modes_are_explicit() {
         "chr1\t20\t.\tAT\tA\t8\tq10\t.\tGT\t0/0\t0/1\t./.\n"
     );
 
+    let output = run(&[
+        "view",
+        input,
+        "--targets",
+        "^chr1:15-24",
+        "--targets-overlap",
+        "record",
+        "--no-header",
+    ]);
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.lines().count(), 4);
+    assert!(!output.contains("chr1\t20\t"));
+
+    let targets = directory.path().join("targets.txt");
+    fs::write(&targets, "chr1:15-24\n").unwrap();
+    let output = run(&[
+        "view",
+        input,
+        "--targets-file",
+        &format!("^{}", targets.display()),
+        "--targets-overlap",
+        "record",
+        "--no-header",
+    ]);
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.lines().count(), 4);
+    assert!(!output.contains("chr1\t20\t"));
+
     let output = run(&["view", input, "--header-only"]);
     assert!(
         String::from_utf8(output.stdout)

@@ -6,8 +6,8 @@ use rsomics_common::{Context, Result, RsomicsError, write_atomic};
 
 use crate::cli::CommandOutput;
 use crate::view::{
-    self, HeaderMode, IdSelection, Options, OutputFormat, OverlapMode, RegionSet, SampleSelection,
-    TypeSelection,
+    self, HeaderMode, IdSelection, Options, OutputFormat, OverlapMode, RegionSelection, RegionSet,
+    SampleSelection, TypeSelection,
 };
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -141,7 +141,7 @@ pub(crate) struct Arguments {
     #[arg(long, value_name = "MODE", default_value = "record")]
     regions_overlap: Overlap,
 
-    /// Streaming target regions, separated by commas
+    /// Streaming target regions, separated by commas; prefix with ^ to exclude
     #[arg(
         short = 't',
         long,
@@ -150,7 +150,7 @@ pub(crate) struct Arguments {
     )]
     targets: Option<String>,
 
-    /// File containing one streaming target region per line
+    /// File containing one streaming target region per line; prefix the path with ^ to exclude
     #[arg(short = 'T', long, value_name = "FILE")]
     targets_file: Option<PathBuf>,
 
@@ -200,7 +200,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         types: parse_types(arguments.types, arguments.exclude_types)?,
         min_alleles: arguments.min_alleles,
         max_alleles: arguments.max_alleles,
-        targets: read_regions(
+        targets: read_targets(
             arguments.targets,
             arguments.targets_file.as_deref(),
             arguments.targets_overlap.into(),
@@ -269,6 +269,42 @@ fn read_regions(
         return Ok(None);
     };
     RegionSet::parse(values, overlap).map(Some)
+}
+
+fn read_targets(
+    list: Option<String>,
+    file: Option<&Path>,
+    overlap: OverlapMode,
+) -> Result<Option<RegionSelection>> {
+    let list_supplied = list.is_some();
+    let mut exclude = false;
+    let mut target_file = file.map(Path::to_path_buf);
+    if let Some(path) = file
+        && let Some(value) = path.to_str().and_then(|value| value.strip_prefix('^'))
+    {
+        if value.is_empty() {
+            return Err(RsomicsError::InvalidInput(
+                "target file path is empty after ^".to_owned(),
+            ));
+        }
+        target_file = Some(PathBuf::from(value));
+        exclude = true;
+    }
+
+    let Some(mut values) = read_list(list, target_file.as_deref(), "target region")? else {
+        return Ok(None);
+    };
+    if list_supplied && let Some(value) = values.first().and_then(|value| value.strip_prefix('^')) {
+        let value = value.to_owned();
+        if value.is_empty() {
+            return Err(RsomicsError::InvalidInput(
+                "target region list is empty after ^".to_owned(),
+            ));
+        }
+        values[0] = value;
+        exclude = true;
+    }
+    RegionSelection::parse(values, overlap, exclude).map(Some)
 }
 
 fn read_list(list: Option<String>, file: Option<&Path>, kind: &str) -> Result<Option<Vec<String>>> {

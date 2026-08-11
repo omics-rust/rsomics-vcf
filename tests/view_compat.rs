@@ -74,6 +74,10 @@ fn selection_and_sample_projection_match_bcftools() {
         (vec!["--known"], vec!["--known"]),
         (vec!["--novel"], vec!["--novel"]),
         (vec!["-m", "2", "-M", "2"], vec!["-m", "2", "-M", "2"]),
+        (
+            vec!["-t", "^chr1:15-24", "--targets-overlap", "record"],
+            vec!["-t", "^chr1:15-24", "--targets-overlap", "1"],
+        ),
         (vec!["-s", "S2,S1", "-G"], vec!["-s", "S2,S1", "-G"]),
     ] {
         assert_eq!(

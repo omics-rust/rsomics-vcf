@@ -16,6 +16,30 @@ pub struct RegionSet {
     overlap: OverlapMode,
 }
 
+#[derive(Clone, Debug)]
+pub struct RegionSelection {
+    regions: RegionSet,
+    exclude: bool,
+}
+
+impl RegionSelection {
+    pub fn new(regions: RegionSet, exclude: bool) -> Self {
+        Self { regions, exclude }
+    }
+
+    pub fn parse(
+        values: impl IntoIterator<Item = String>,
+        overlap: OverlapMode,
+        exclude: bool,
+    ) -> Result<Self> {
+        RegionSet::parse(values, overlap).map(|regions| Self::new(regions, exclude))
+    }
+
+    pub(crate) fn keeps(&self, record: &RecordBuf) -> bool {
+        self.regions.matches(record) != self.exclude
+    }
+}
+
 impl RegionSet {
     pub fn new(regions: Vec<Region>, overlap: OverlapMode) -> Result<Self> {
         if regions.is_empty() {
@@ -188,5 +212,14 @@ mod tests {
                 OverlapMode::Variant
             ));
         }
+    }
+
+    #[test]
+    fn region_selection_can_include_or_exclude_matches() {
+        let record = record(b"chr1\t10\t.\tA\tC\t10\tPASS\t.");
+        let regions = RegionSet::parse(["chr1:10".to_owned()], OverlapMode::Position).unwrap();
+
+        assert!(RegionSelection::new(regions.clone(), false).keeps(&record));
+        assert!(!RegionSelection::new(regions, true).keeps(&record));
     }
 }

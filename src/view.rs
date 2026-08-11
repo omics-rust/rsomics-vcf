@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::format::{Reader, Writer, reformat_record};
 
 pub use crate::format::{HeaderMode, OutputFormat};
-pub use crate::regions::{OverlapMode, RegionSet};
+pub use crate::regions::{OverlapMode, RegionSelection, RegionSet};
 pub use samples::SampleSelection;
 pub use selection::TypeSelection;
 
@@ -35,7 +35,7 @@ pub struct Options {
     pub types: Option<TypeSelection>,
     pub min_alleles: Option<usize>,
     pub max_alleles: Option<usize>,
-    pub targets: Option<RegionSet>,
+    pub targets: Option<RegionSelection>,
     pub regions: Option<RegionSet>,
 }
 
@@ -141,7 +141,7 @@ pub fn write(input: &Path, options: &Options, output: impl Write) -> Result<Summ
             || options
                 .targets
                 .as_ref()
-                .is_some_and(|targets| !targets.matches(&record))
+                .is_some_and(|targets| !targets.keeps(&record))
         {
             continue;
         }

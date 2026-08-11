@@ -60,7 +60,7 @@ pub(super) fn write_indexed(
                 || options
                     .targets
                     .as_ref()
-                    .is_some_and(|targets| !targets.matches(&record))
+                    .is_some_and(|targets| !targets.keeps(&record))
             {
                 continue;
             }
