@@ -16,17 +16,61 @@ pub(super) fn evaluate<'a>(
         (FunctionKind::Count, Evaluated::Truth(truth)) => {
             let count = truth
                 .samples
-                .map(|samples| samples.into_iter().filter(|value| *value).count())
+                .map(|samples| {
+                    samples
+                        .passes
+                        .into_iter()
+                        .zip(samples.selected)
+                        .filter(|(passes, selected)| *passes && *selected)
+                        .count()
+                })
                 .unwrap_or(usize::from(truth.site));
             Ok(Evaluated::Values(Values::Site(vec![Atom::Number(
                 count as f64,
             )])))
         }
+        (
+            kind @ (FunctionKind::PassingSampleCount | FunctionKind::PassingSampleFraction),
+            Evaluated::Truth(truth),
+        ) => passing_samples(kind, truth).map(Evaluated::Values),
         (_, Evaluated::Values(values)) => apply_values(kind, values).map(Evaluated::Values),
         (_, Evaluated::Truth(_)) => Err(EvaluateError::new(
             "function requires values rather than a truth expression",
         )),
     }
+}
+
+fn passing_samples<'a>(
+    kind: FunctionKind,
+    truth: super::Truth,
+) -> Result<Values<'a>, EvaluateError> {
+    let Some(samples) = truth.samples else {
+        return Err(EvaluateError::new(
+            "passing-sample function requires a FORMAT expression",
+        ));
+    };
+    let selected = samples
+        .selected
+        .iter()
+        .filter(|selected| **selected)
+        .count();
+    let passes = samples
+        .passes
+        .iter()
+        .zip(&samples.selected)
+        .filter(|(passes, selected)| **passes && **selected)
+        .count();
+    let value = match kind {
+        FunctionKind::PassingSampleCount => passes as f64,
+        FunctionKind::PassingSampleFraction if selected == 0 => 0.0,
+        FunctionKind::PassingSampleFraction => passes as f64 / selected as f64,
+        _ => {
+            return Err(EvaluateError::new(
+                "function is not a passing-sample operation",
+            ));
+        }
+    };
+    Ok(Values::Site(vec![Atom::Number(value)]))
 }
 
 pub(super) fn apply_values<'a>(

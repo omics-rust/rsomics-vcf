@@ -19,8 +19,14 @@ use logical::logical;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Truth {
-    pub site: bool,
-    pub samples: Option<Vec<bool>>,
+    site: bool,
+    samples: Option<SampleTruth>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SampleTruth {
+    passes: Vec<bool>,
+    selected: Box<[bool]>,
 }
 
 impl Truth {
@@ -31,14 +37,27 @@ impl Truth {
         }
     }
 
-    fn samples(values: Vec<bool>) -> Self {
-        Self::with_samples(values.iter().any(|value| *value), values)
+    fn samples(passes: Vec<bool>) -> Self {
+        let selected = vec![true; passes.len()].into_boxed_slice();
+        Self::selected_samples(passes, selected)
     }
 
-    fn with_samples(site: bool, values: Vec<bool>) -> Self {
+    fn selected_samples(passes: Vec<bool>, selected: Box<[bool]>) -> Self {
+        let site = passes
+            .iter()
+            .zip(&selected)
+            .any(|(passes, selected)| *passes && *selected);
+        Self::with_samples(site, passes, selected)
+    }
+
+    fn with_samples(site: bool, mut passes: Vec<bool>, selected: Box<[bool]>) -> Self {
+        debug_assert_eq!(passes.len(), selected.len());
+        for (passes, selected) in passes.iter_mut().zip(&selected) {
+            *passes &= *selected;
+        }
         Self {
             site,
-            samples: Some(values),
+            samples: Some(SampleTruth { passes, selected }),
         }
     }
 }
@@ -350,10 +369,11 @@ mod tests {
         }
         assert_eq!(
             truth("QUAL > 40 | FMT/DP < 0", &header, &record),
-            Truth {
-                site: true,
-                samples: Some(vec![false, false, false]),
-            }
+            Truth::with_samples(
+                true,
+                vec![false, false, false],
+                vec![true, true, true].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("QUAL > 40 || FMT/DP < 0", &header, &record),
@@ -410,11 +430,17 @@ mod tests {
         let (header, record) = fixture();
         assert_eq!(
             truth("FMT/DP[0] >= 8", &header, &record),
-            Truth::samples(vec![true, false, false])
+            Truth::selected_samples(
+                vec![true, false, false],
+                vec![true, false, false].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("FMT/DP[1-] > 1", &header, &record),
-            Truth::samples(vec![false, false, true])
+            Truth::selected_samples(
+                vec![false, false, true],
+                vec![false, true, true].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("FMT/AD[:1] >= 4", &header, &record),
@@ -422,31 +448,52 @@ mod tests {
         );
         assert_eq!(
             truth("FMT/AD[1:2] > 4", &header, &record),
-            Truth::samples(vec![false, true, false])
+            Truth::selected_samples(
+                vec![false, true, false],
+                vec![false, true, false].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("FMT/AD[0,2:0-1] > 3", &header, &record),
-            Truth::samples(vec![true, false, false])
+            Truth::selected_samples(
+                vec![true, false, false],
+                vec![true, false, true].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("FMT/DP[0] = '.'", &header, &record),
-            Truth::samples(vec![false, false, false])
+            Truth::selected_samples(
+                vec![false, false, false],
+                vec![true, false, false].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("FMT/DP[1] = '.'", &header, &record),
-            Truth::samples(vec![false, true, false])
+            Truth::selected_samples(
+                vec![false, true, false],
+                vec![false, true, false].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("FMT/DP[0] + 2 >= 10", &header, &record),
-            Truth::samples(vec![true, false, false])
+            Truth::selected_samples(
+                vec![true, false, false],
+                vec![true, false, false].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("FMT/ST[1] ~ '^beta$/i'", &header, &record),
-            Truth::samples(vec![false, true, false])
+            Truth::selected_samples(
+                vec![false, true, false],
+                vec![false, true, false].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("FMT/DP[0] >= 8 | FMT/AD[1:2] > 4", &header, &record,),
-            Truth::samples(vec![true, true, false])
+            Truth::selected_samples(
+                vec![true, true, false],
+                vec![true, true, false].into_boxed_slice()
+            )
         );
     }
 
@@ -459,7 +506,10 @@ mod tests {
         );
         assert_eq!(
             truth("FMT/AD[0:GT] > 3", &header, &record),
-            Truth::samples(vec![true, false, false])
+            Truth::selected_samples(
+                vec![true, false, false],
+                vec![true, false, false].into_boxed_slice()
+            )
         );
     }
 
@@ -475,7 +525,10 @@ mod tests {
         drop(samples);
         assert_eq!(
             evaluate(&expression, &header, &record).unwrap(),
-            Truth::samples(vec![false, false, true])
+            Truth::selected_samples(
+                vec![false, false, true],
+                vec![false, true, true].into_boxed_slice()
+            )
         );
     }
 
@@ -525,7 +578,10 @@ mod tests {
         );
         assert_eq!(
             truth("SMPL_SUM(FMT/AD[0]) = 8", &header, &record),
-            Truth::samples(vec![true, false, false])
+            Truth::selected_samples(
+                vec![true, false, false],
+                vec![true, false, false].into_boxed_slice()
+            )
         );
         assert_eq!(
             truth("SMPL_SUM(FMT/DP) = '.'", &header, &record),
@@ -599,5 +655,34 @@ mod tests {
             truth("sCOUNT(FMT/AD[:2]) = 1", &header, &record),
             Truth::samples(vec![true, true, false])
         );
+    }
+
+    #[test]
+    fn passing_sample_functions_count_and_fraction_all_samples() {
+        let (header, record) = fixture();
+        for source in ["N_PASS(FMT/DP >= 8) = 1", "F_PASS(FMT/DP >= 8) = 1 / 3"] {
+            assert_eq!(
+                truth(source, &header, &record),
+                Truth::site(true),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn passing_sample_fraction_uses_the_expression_selection() {
+        let (header, record) = fixture();
+        for source in [
+            "N_PASS(FMT/DP[0] >= 8) = 1",
+            "F_PASS(FMT/DP[0] >= 8) = 1",
+            "N_PASS(FMT/DP[0] >= 8 | FMT/DP[2] > 2) = 1",
+            "F_PASS(FMT/DP[0] >= 8 | FMT/DP[2] > 2) = 0.5",
+        ] {
+            assert_eq!(
+                truth(source, &header, &record),
+                Truth::site(true),
+                "{source}"
+            );
+        }
     }
 }

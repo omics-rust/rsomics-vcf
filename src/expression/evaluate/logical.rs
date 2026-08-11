@@ -7,32 +7,32 @@ pub(super) fn logical(
     right: Truth,
     operator: BinaryOperator,
 ) -> Result<Truth, EvaluateError> {
-    let sample_count = sample_count(&left, &right)?;
+    let selected = selected_union(&left, &right)?;
     match operator {
         BinaryOperator::SampleAnd | BinaryOperator::SiteAnd => {
             if !left.site || !right.site {
-                return Ok(sample_count
-                    .map(|count| Truth::with_samples(false, vec![false; count]))
-                    .unwrap_or_else(|| Truth::site(false)));
+                return Ok(false_truth(selected));
             }
             match (left.samples, right.samples) {
                 (None, None) => Ok(Truth::site(true)),
                 (Some(samples), None) | (None, Some(samples)) => {
-                    Ok(Truth::with_samples(true, samples))
+                    Ok(Truth::with_samples(true, samples.passes, samples.selected))
                 }
                 (Some(left), Some(right)) => {
-                    let samples = left
-                        .iter()
-                        .zip(right)
+                    let selected = selected.expect("sample truth has a selection");
+                    let passes = left
+                        .passes
+                        .into_iter()
+                        .zip(right.passes)
                         .map(|(left, right)| match operator {
-                            BinaryOperator::SampleAnd => *left && right,
-                            BinaryOperator::SiteAnd => *left || right,
+                            BinaryOperator::SampleAnd => left && right,
+                            BinaryOperator::SiteAnd => left || right,
                             _ => unreachable!(),
                         })
                         .collect();
                     Ok(match operator {
-                        BinaryOperator::SampleAnd => Truth::samples(samples),
-                        BinaryOperator::SiteAnd => Truth::with_samples(true, samples),
+                        BinaryOperator::SampleAnd => Truth::selected_samples(passes, selected),
+                        BinaryOperator::SiteAnd => Truth::with_samples(true, passes, selected),
                         _ => unreachable!(),
                     })
                 }
@@ -40,37 +40,38 @@ pub(super) fn logical(
         }
         BinaryOperator::SampleOr | BinaryOperator::SiteOr => {
             if !left.site && !right.site {
-                return Ok(sample_count
-                    .map(|count| Truth::with_samples(false, vec![false; count]))
-                    .unwrap_or_else(|| Truth::site(false)));
+                return Ok(false_truth(selected));
             }
             match (left.samples, right.samples) {
                 (None, None) => Ok(Truth::site(true)),
                 (Some(samples), None) => {
-                    if operator == BinaryOperator::SiteOr && right.site {
-                        Ok(Truth::with_samples(true, vec![true; samples.len()]))
+                    let passes = if operator == BinaryOperator::SiteOr && right.site {
+                        samples.selected.to_vec()
                     } else {
-                        Ok(Truth::with_samples(true, samples))
-                    }
+                        samples.passes
+                    };
+                    Ok(Truth::with_samples(true, passes, samples.selected))
                 }
                 (None, Some(samples)) => {
-                    if operator == BinaryOperator::SiteOr && left.site {
-                        Ok(Truth::with_samples(true, vec![true; samples.len()]))
+                    let passes = if operator == BinaryOperator::SiteOr && left.site {
+                        samples.selected.to_vec()
                     } else {
-                        Ok(Truth::with_samples(true, samples))
-                    }
+                        samples.passes
+                    };
+                    Ok(Truth::with_samples(true, passes, samples.selected))
                 }
                 (Some(left), Some(right)) => {
-                    if operator == BinaryOperator::SiteOr {
-                        Ok(Truth::with_samples(true, vec![true; left.len()]))
+                    let selected = selected.expect("sample truth has a selection");
+                    let passes = if operator == BinaryOperator::SiteOr {
+                        selected.to_vec()
                     } else {
-                        let samples = left
+                        left.passes
                             .into_iter()
-                            .zip(right)
+                            .zip(right.passes)
                             .map(|(left, right)| left || right)
-                            .collect();
-                        Ok(Truth::with_samples(true, samples))
-                    }
+                            .collect()
+                    };
+                    Ok(Truth::with_samples(true, passes, selected))
                 }
             }
         }
@@ -78,14 +79,30 @@ pub(super) fn logical(
     }
 }
 
-fn sample_count(left: &Truth, right: &Truth) -> Result<Option<usize>, EvaluateError> {
+fn selected_union(left: &Truth, right: &Truth) -> Result<Option<Box<[bool]>>, EvaluateError> {
     match (&left.samples, &right.samples) {
-        (Some(left), Some(right)) if left.len() != right.len() => Err(EvaluateError::new(format!(
-            "incompatible sample counts in logical expression: {} vs {}",
-            left.len(),
-            right.len()
-        ))),
-        (Some(samples), _) | (_, Some(samples)) => Ok(Some(samples.len())),
+        (Some(left), Some(right)) if left.selected.len() != right.selected.len() => {
+            Err(EvaluateError::new(format!(
+                "incompatible sample counts in logical expression: {} vs {}",
+                left.selected.len(),
+                right.selected.len()
+            )))
+        }
+        (Some(left), Some(right)) => Ok(Some(
+            left.selected
+                .iter()
+                .zip(&right.selected)
+                .map(|(left, right)| *left || *right)
+                .collect(),
+        )),
+        (Some(samples), None) | (None, Some(samples)) => Ok(Some(samples.selected.clone())),
         (None, None) => Ok(None),
+    }
+}
+
+fn false_truth(selected: Option<Box<[bool]>>) -> Truth {
+    match selected {
+        Some(selected) => Truth::with_samples(false, vec![false; selected.len()], selected),
+        None => Truth::site(false),
     }
 }

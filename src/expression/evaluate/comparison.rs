@@ -34,46 +34,57 @@ pub(super) fn compare(
                     "incompatible per-sample value counts in comparison: {left_width} vs {right_width}"
                 )));
             }
-            left.values
+            let selected: Box<[bool]> = left
+                .selected
+                .iter()
+                .zip(&right.selected)
+                .map(|(left, right)| *left && *right)
+                .collect();
+            let passes = left
+                .values
                 .iter()
                 .zip(&right.values)
-                .zip(left.selected.iter().zip(&right.selected))
-                .map(|((left, right), (left_selected, right_selected))| {
-                    if *left_selected && *right_selected {
+                .zip(&selected)
+                .map(|((left, right), selected)| {
+                    if *selected {
                         compare_pairs(left, right, left_width, operator)
                     } else {
                         Ok(false)
                     }
                 })
-                .collect::<Result<_, _>>()
-                .map(Truth::samples)
+                .collect::<Result<_, _>>()?;
+            Ok(Truth::selected_samples(passes, selected))
         }
-        (Values::Samples(samples), Values::Site(site)) => samples
-            .values
-            .iter()
-            .zip(&samples.selected)
-            .map(|(sample, selected)| {
-                if *selected {
-                    compare_cross(sample, &site, operator)
-                } else {
-                    Ok(false)
-                }
-            })
-            .collect::<Result<_, _>>()
-            .map(Truth::samples),
-        (Values::Site(site), Values::Samples(samples)) => samples
-            .values
-            .iter()
-            .zip(&samples.selected)
-            .map(|(sample, selected)| {
-                if *selected {
-                    compare_cross(&site, sample, operator)
-                } else {
-                    Ok(false)
-                }
-            })
-            .collect::<Result<_, _>>()
-            .map(Truth::samples),
+        (Values::Samples(samples), Values::Site(site)) => {
+            let passes = samples
+                .values
+                .iter()
+                .zip(&samples.selected)
+                .map(|(sample, selected)| {
+                    if *selected {
+                        compare_cross(sample, &site, operator)
+                    } else {
+                        Ok(false)
+                    }
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Truth::selected_samples(passes, samples.selected))
+        }
+        (Values::Site(site), Values::Samples(samples)) => {
+            let passes = samples
+                .values
+                .iter()
+                .zip(&samples.selected)
+                .map(|(sample, selected)| {
+                    if *selected {
+                        compare_cross(&site, sample, operator)
+                    } else {
+                        Ok(false)
+                    }
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Truth::selected_samples(passes, samples.selected))
+        }
     }
 }
 
@@ -108,19 +119,21 @@ fn compare_regex(
     let negate = operator == BinaryOperator::NotRegex;
     match values {
         Values::Site(values) => regex_values(&values, &regex, negate).map(Truth::site),
-        Values::Samples(samples) => samples
-            .values
-            .iter()
-            .zip(&samples.selected)
-            .map(|(values, selected)| {
-                if *selected {
-                    regex_values(values, &regex, negate)
-                } else {
-                    Ok(false)
-                }
-            })
-            .collect::<Result<_, _>>()
-            .map(Truth::samples),
+        Values::Samples(samples) => {
+            let passes = samples
+                .values
+                .iter()
+                .zip(&samples.selected)
+                .map(|(values, selected)| {
+                    if *selected {
+                        regex_values(values, &regex, negate)
+                    } else {
+                        Ok(false)
+                    }
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Truth::selected_samples(passes, samples.selected))
+        }
     }
 }
 
