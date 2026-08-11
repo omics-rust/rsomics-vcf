@@ -1,7 +1,15 @@
 use noodles_vcf::{
     self as vcf,
     header::record::value::{Map, map::Filter as HeaderFilter},
-    variant::{RecordBuf, record_buf::Filters},
+    variant::{
+        RecordBuf,
+        record::samples::series::value::genotype::Phasing,
+        record_buf::{
+            Filters, Samples,
+            info::field::{Value as InfoValue, value::Array},
+            samples::sample::Value as SampleValue,
+        },
+    },
 };
 use rsomics_common::{Result, RsomicsError};
 
@@ -47,6 +55,13 @@ pub(crate) struct Options {
     pub logic: Logic,
     pub soft_filter: Option<String>,
     pub mode: AnnotationMode,
+    pub set_genotypes: Option<GenotypeReplacement>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GenotypeReplacement {
+    Missing,
+    Reference,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +103,7 @@ pub(crate) struct Program {
     logic: Logic,
     failure_filter: Option<String>,
     mode: AnnotationMode,
+    set_genotypes: Option<GenotypeReplacement>,
 }
 
 impl Program {
@@ -103,6 +119,7 @@ impl Program {
             logic: options.logic,
             failure_filter,
             mode: options.mode,
+            set_genotypes: options.set_genotypes,
         })
     }
 
@@ -140,19 +157,144 @@ impl Program {
                 *record.filters_mut() = [filter.clone()].into_iter().collect();
             }
         }
+        if let Some(replacement) = self.set_genotypes {
+            replace_failed_genotypes(record, site_passes, sample_passes.as_deref(), replacement)?;
+        }
 
-        let disposition =
-            if site_passes || self.failure_filter.is_some() || retain_failed == RetainFailed::Yes {
-                Disposition::Keep
-            } else {
-                Disposition::Drop
-            };
+        let disposition = if site_passes
+            || self.failure_filter.is_some()
+            || self.set_genotypes.is_some()
+            || retain_failed == RetainFailed::Yes
+        {
+            Disposition::Keep
+        } else {
+            Disposition::Drop
+        };
         Ok(Decision {
             disposition,
             site_passes,
             sample_passes,
         })
     }
+}
+
+fn replace_failed_genotypes(
+    record: &mut RecordBuf,
+    site_passes: bool,
+    sample_passes: Option<&[bool]>,
+    replacement: GenotypeReplacement,
+) -> Result<()> {
+    let keys = record.samples().keys().clone();
+    let Some(genotype_index) = keys.as_ref().get_index_of("GT") else {
+        return Ok(());
+    };
+    let mut samples: Vec<_> = record
+        .samples()
+        .values()
+        .map(|sample| sample.values().to_vec())
+        .collect();
+    if sample_passes.is_some_and(|passes| passes.len() != samples.len()) {
+        return Err(RsomicsError::InvalidInput(
+            "filter sample count does not match the record".to_owned(),
+        ));
+    }
+
+    let alternate_count = record.alternate_bases().as_ref().len();
+    let mut ac = valid_ac(record, alternate_count);
+    let mut an = valid_an(record);
+    for (sample_index, sample) in samples.iter_mut().enumerate() {
+        let passes = sample_passes.map_or(site_passes, |passes| passes[sample_index]);
+        if passes {
+            continue;
+        }
+        let Some(Some(value)) = sample.get_mut(genotype_index) else {
+            continue;
+        };
+        let SampleValue::Genotype(genotype) = value else {
+            return Err(RsomicsError::InvalidInput(
+                "FORMAT/GT is not encoded as a genotype".to_owned(),
+            ));
+        };
+        for allele in genotype.as_mut() {
+            let position = allele.position();
+            if let Some(position) = position {
+                if position > alternate_count {
+                    return Err(RsomicsError::InvalidInput(format!(
+                        "genotype allele index {position} exceeds {alternate_count} ALT alleles"
+                    )));
+                }
+                if position > 0 {
+                    decrement_ac(&mut ac, position - 1)?;
+                }
+            }
+            match replacement {
+                GenotypeReplacement::Missing => {
+                    if position.is_some() {
+                        adjust_an(&mut an, -1)?;
+                    }
+                    *allele.position_mut() = None;
+                }
+                GenotypeReplacement::Reference => {
+                    if position.is_none() {
+                        adjust_an(&mut an, 1)?;
+                    }
+                    *allele.position_mut() = Some(0);
+                }
+            }
+            *allele.phasing_mut() = Phasing::Unphased;
+        }
+    }
+    *record.samples_mut() = Samples::new(keys, samples);
+    if let Some(ac) = ac {
+        record.info_mut().insert(
+            "AC".to_owned(),
+            Some(InfoValue::Array(Array::Integer(
+                ac.into_iter().map(Some).collect(),
+            ))),
+        );
+    }
+    if let Some(an) = an {
+        record
+            .info_mut()
+            .insert("AN".to_owned(), Some(InfoValue::Integer(an)));
+    }
+    Ok(())
+}
+
+fn valid_ac(record: &RecordBuf, alternate_count: usize) -> Option<Vec<i32>> {
+    let Some(Some(InfoValue::Array(Array::Integer(values)))) = record.info().get("AC") else {
+        return None;
+    };
+    (values.len() == alternate_count)
+        .then(|| values.iter().copied().collect::<Option<Vec<_>>>())
+        .flatten()
+}
+
+fn valid_an(record: &RecordBuf) -> Option<i32> {
+    match record.info().get("AN") {
+        Some(Some(InfoValue::Integer(value))) => Some(*value),
+        _ => None,
+    }
+}
+
+fn decrement_ac(ac: &mut Option<Vec<i32>>, index: usize) -> Result<()> {
+    let Some(ac) = ac else {
+        return Ok(());
+    };
+    ac[index] = ac[index]
+        .checked_sub(1)
+        .ok_or_else(|| RsomicsError::InvalidInput("INFO/AC count underflow".to_owned()))?;
+    Ok(())
+}
+
+fn adjust_an(an: &mut Option<i32>, difference: i32) -> Result<()> {
+    let Some(an) = an else {
+        return Ok(());
+    };
+    *an = an
+        .checked_add(difference)
+        .ok_or_else(|| RsomicsError::InvalidInput("INFO/AN count overflow".to_owned()))?;
+    Ok(())
 }
 
 fn register_filter(
@@ -182,7 +324,16 @@ fn register_filter(
 
 #[cfg(test)]
 mod tests {
-    use noodles_vcf::{self as vcf, variant::RecordBuf};
+    use noodles_vcf::{
+        self as vcf,
+        variant::{
+            RecordBuf,
+            record_buf::{
+                info::field::{Value as InfoValue, value::Array},
+                samples::sample::Value as SampleValue,
+            },
+        },
+    };
 
     use super::*;
 
@@ -200,6 +351,53 @@ mod tests {
                 .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &record).unwrap();
         (header, record)
+    }
+
+    fn genotype_fixture(record: &[u8]) -> (vcf::Header, RecordBuf) {
+        let header: vcf::Header = "##fileformat=VCFv4.3\n\
+##FILTER=<ID=PASS,Description=\"All filters passed\">\n\
+##INFO=<ID=AC,Number=A,Type=Integer,Description=\"allele count\">\n\
+##INFO=<ID=AN,Number=1,Type=Integer,Description=\"allele number\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n"
+            .parse()
+            .unwrap();
+        let record = vcf::Record::try_from(record).unwrap();
+        let record = RecordBuf::try_from_variant_record(&header, &record).unwrap();
+        (header, record)
+    }
+
+    fn genotype(record: &RecordBuf, sample: usize) -> Vec<Option<usize>> {
+        let value = record
+            .samples()
+            .get_index(sample)
+            .unwrap()
+            .get("GT")
+            .unwrap()
+            .unwrap();
+        let SampleValue::Genotype(value) = value else {
+            panic!("GT is not a genotype")
+        };
+        value
+            .as_ref()
+            .iter()
+            .map(|allele| allele.position())
+            .collect()
+    }
+
+    fn integer_info(record: &RecordBuf, key: &str) -> Option<i32> {
+        match record.info().get(key) {
+            Some(Some(InfoValue::Integer(value))) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn integer_array_info(record: &RecordBuf, key: &str) -> Vec<Option<i32>> {
+        match record.info().get(key) {
+            Some(Some(InfoValue::Array(Array::Integer(values)))) => values.clone(),
+            _ => Vec::new(),
+        }
     }
 
     #[test]
@@ -360,5 +558,93 @@ mod tests {
         .unwrap();
         assert_eq!(program.failure_filter(), Some("Filter2"));
         assert!(header.filters().contains_key("Filter2"));
+    }
+
+    #[test]
+    fn failed_samples_can_be_set_missing_and_update_valid_ac_an() {
+        let (mut header, mut record) =
+            genotype_fixture(b"chr1\t1\t.\tA\tC,G\t10\tPASS\tAC=4,3;AN=10\tGT:DP\t0|1:8\t2/2:20");
+        let program = Program::bind(
+            &mut header,
+            "FMT/DP >= 10",
+            Options {
+                set_genotypes: Some(GenotypeReplacement::Missing),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let decision = program
+            .apply(&header, &mut record, RetainFailed::No)
+            .unwrap();
+        assert_eq!(decision.disposition(), Disposition::Keep);
+        assert_eq!(genotype(&record, 0), [None, None]);
+        assert_eq!(genotype(&record, 1), [Some(2), Some(2)]);
+        assert_eq!(integer_array_info(&record, "AC"), [Some(3), Some(3)]);
+        assert_eq!(integer_info(&record, "AN"), Some(8));
+    }
+
+    #[test]
+    fn failed_samples_can_be_set_reference_and_count_missing_alleles() {
+        let (mut header, mut record) =
+            genotype_fixture(b"chr1\t1\t.\tA\tC,G\t10\tPASS\tAC=4,3;AN=10\tGT:DP\t./2:8\t1/1:20");
+        let program = Program::bind(
+            &mut header,
+            "FMT/DP >= 10",
+            Options {
+                set_genotypes: Some(GenotypeReplacement::Reference),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        program
+            .apply(&header, &mut record, RetainFailed::No)
+            .unwrap();
+        assert_eq!(genotype(&record, 0), [Some(0), Some(0)]);
+        assert_eq!(genotype(&record, 1), [Some(1), Some(1)]);
+        assert_eq!(integer_array_info(&record, "AC"), [Some(4), Some(2)]);
+        assert_eq!(integer_info(&record, "AN"), Some(11));
+    }
+
+    #[test]
+    fn malformed_ac_an_are_preserved_while_genotypes_change() {
+        let (mut header, mut record) =
+            genotype_fixture(b"chr1\t1\t.\tA\tC,G\t10\tPASS\tAC=4;AN=.\tGT:DP\t0/1:8\t2/2:20");
+        let original_info = record.info().clone();
+        let program = Program::bind(
+            &mut header,
+            "FMT/DP >= 10",
+            Options {
+                set_genotypes: Some(GenotypeReplacement::Missing),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        program
+            .apply(&header, &mut record, RetainFailed::No)
+            .unwrap();
+        assert_eq!(genotype(&record, 0), [None, None]);
+        assert_eq!(record.info(), &original_info);
+    }
+
+    #[test]
+    fn site_failure_rewrites_every_sample_and_single_alt_ac() {
+        let (mut header, mut record) =
+            genotype_fixture(b"chr1\t1\t.\tA\tC\t10\tPASS\tAC=3;AN=4\tGT:DP\t0/1:8\t1/1:20");
+        let program = Program::bind(
+            &mut header,
+            "QUAL >= 20",
+            Options {
+                set_genotypes: Some(GenotypeReplacement::Missing),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        program
+            .apply(&header, &mut record, RetainFailed::No)
+            .unwrap();
+        assert_eq!(genotype(&record, 0), [None, None]);
+        assert_eq!(genotype(&record, 1), [None, None]);
+        assert_eq!(integer_array_info(&record, "AC"), [Some(0)]);
+        assert_eq!(integer_info(&record, "AN"), Some(0));
     }
 }
