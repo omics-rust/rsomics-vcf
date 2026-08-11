@@ -553,9 +553,13 @@ impl<'a> Parser<'a> {
         let token = self.advance()?;
         match token.kind {
             TokenKind::Number(value) => Ok(Expression::Value(Value::Number(value))),
+            TokenKind::String(value) if value == "." => Ok(Expression::Value(Value::Missing)),
             TokenKind::String(value) => Ok(Expression::Value(Value::String(value))),
             TokenKind::File(path) => Ok(Expression::Value(Value::File(path))),
-            TokenKind::Identifier(name) if name == "." => Ok(Expression::Value(Value::Missing)),
+            TokenKind::Identifier(name) if name == "." => Err(ParseError::new(
+                token.offset,
+                "missing values must be quoted as \".\"",
+            )),
             TokenKind::Identifier(name) => self.parse_identifier(name),
             TokenKind::LeftParen => {
                 let expression = self.parse_site_or()?;
@@ -845,6 +849,15 @@ mod tests {
             }
         ));
         assert!(parse("FMT/AD[:1] > 2 & FMT/AD[0:] > 3").is_ok());
+    }
+
+    #[test]
+    fn missing_values_use_the_bcftools_quoted_spelling() {
+        let Expression::Binary { right, .. } = parse("X = \".\"").unwrap() else {
+            panic!("expected comparison");
+        };
+        assert_eq!(*right, Expression::Value(Value::Missing));
+        assert!(parse("X = .").is_err());
     }
 
     #[test]
