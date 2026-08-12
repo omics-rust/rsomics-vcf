@@ -2,7 +2,7 @@ use std::io;
 
 use super::value::ValueType;
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TypeMap(Vec<(Vec<u8>, ValueType)>);
 
 impl TypeMap {
@@ -18,7 +18,7 @@ impl TypeMap {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct HeaderTypes {
     info: TypeMap,
     format: TypeMap,
@@ -26,7 +26,7 @@ pub(crate) struct HeaderTypes {
 }
 
 impl HeaderTypes {
-    pub(super) fn parse(header: &[u8]) -> io::Result<Self> {
+    pub(crate) fn parse(header: &[u8]) -> io::Result<Self> {
         let mut types = Self::default();
         let mut chrom = false;
         for line in header.split(|byte| *byte == b'\n') {

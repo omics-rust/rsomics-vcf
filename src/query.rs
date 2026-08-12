@@ -37,7 +37,7 @@ pub fn write(input: &Path, options: &Options, mut output: impl Write) -> Result<
     let mut reader = Reader::open(input)?;
     let (header, _, schema) = reader.read_header()?;
     let tokens = query_format::parse(&options.format)?;
-    validate(&tokens, &schema, false)?;
+    query_format::validate(&tokens, &schema, false)?;
     let selected = select_samples(&schema, options.samples.as_deref())?;
     let automatic_newline = options.automatic_newline && !query_format::contains_newline(&tokens);
     let context = Context {
@@ -167,6 +167,35 @@ fn render_record(
     output
         .write_all(&scratch.rendered)
         .map_err(RsomicsError::Io)
+}
+
+pub(crate) fn render_site(
+    tokens: &[Token],
+    schema: &HeaderTypes,
+    line: &[u8],
+    columns: &mut Vec<Range<usize>>,
+    sample_values: &mut Vec<Range<usize>>,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    columns.clear();
+    split_spans(line, 0..line.len(), b'\t', columns);
+    sample_values.clear();
+    let context = Context {
+        tokens,
+        schema,
+        selected: &[],
+        automatic_newline: false,
+    };
+    render_tokens(
+        &context,
+        tokens,
+        line,
+        columns,
+        &[],
+        None,
+        sample_values,
+        output,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -466,36 +495,6 @@ fn field_label(field: &Field) -> &[u8] {
     }
 }
 
-fn validate(tokens: &[Token], schema: &HeaderTypes, in_samples: bool) -> Result<()> {
-    for token in tokens {
-        match token {
-            Token::Literal(_) => {}
-            Token::Samples(inner) => validate(inner, schema, true)?,
-            Token::Field { field, .. } => match field {
-                Field::InfoTag(name) if schema.info(name).is_none() => {
-                    return Err(no_tag("INFO", name));
-                }
-                Field::Named(name) if in_samples => {
-                    if schema.format(name).is_none() && !is_fixed(name) {
-                        return Err(no_tag("FORMAT", name));
-                    }
-                }
-                Field::Named(name) if schema.info(name).is_none() => {
-                    return Err(no_tag("INFO", name));
-                }
-                Field::Fixed(name) if !is_fixed(name) => {
-                    return Err(invalid("unknown fixed VCF field"));
-                }
-                Field::Vkey => {
-                    return Err(invalid("%VKX is not enabled in the current query engine"));
-                }
-                _ => {}
-            },
-        }
-    }
-    Ok(())
-}
-
 fn select_samples(schema: &HeaderTypes, wanted: Option<&[String]>) -> Result<Vec<usize>> {
     let Some(wanted) = wanted else {
         return Ok((0..schema.samples()).collect());
@@ -718,32 +717,6 @@ fn resolve<'a>(line: &'a [u8], columns: &[Range<usize>], index: usize) -> &'a [u
 fn split_once(field: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
     let position = field.iter().position(|value| *value == separator)?;
     Some((&field[..position], &field[position + 1..]))
-}
-
-fn is_fixed(name: &[u8]) -> bool {
-    matches!(
-        name,
-        b"CHROM"
-            | b"POS"
-            | b"POS0"
-            | b"END"
-            | b"END0"
-            | b"ID"
-            | b"REF"
-            | b"ALT"
-            | b"FIRST_ALT"
-            | b"QUAL"
-            | b"FILTER"
-            | b"TYPE"
-            | b"LINE"
-    )
-}
-
-fn no_tag(kind: &str, name: &[u8]) -> RsomicsError {
-    RsomicsError::InvalidInput(format!(
-        "no such {kind} tag defined in the VCF header: {}",
-        String::from_utf8_lossy(name)
-    ))
 }
 
 pub(crate) fn invalid(message: &str) -> RsomicsError {

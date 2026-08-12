@@ -1,4 +1,23 @@
+use std::{cell::RefCell, ops::Range};
+
+use noodles_vcf::{self as vcf, variant::io::Write as _};
 use rsomics_common::{Result, RsomicsError};
+
+use crate::format::{HeaderTypes, trim_line_ending};
+
+#[derive(Debug)]
+pub(crate) struct SiteFormat {
+    tokens: Vec<Token>,
+    schema: HeaderTypes,
+    scratch: RefCell<SiteScratch>,
+}
+
+#[derive(Debug, Default)]
+struct SiteScratch {
+    line: Vec<u8>,
+    columns: Vec<Range<usize>>,
+    sample_values: Vec<Range<usize>>,
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Field {
@@ -52,6 +71,141 @@ pub(crate) fn contains_newline(tokens: &[Token]) -> bool {
         Token::Samples(inner) => contains_newline(inner),
         Token::Field { .. } => false,
     })
+}
+
+impl SiteFormat {
+    pub(crate) fn bind(source: &str, schema: &HeaderTypes) -> Result<Self> {
+        let tokens = parse(source)?;
+        if tokens.is_empty() {
+            return Err(invalid("site format must not be empty"));
+        }
+        validate(&tokens, schema, false)?;
+        validate_site(&tokens)?;
+        Ok(Self {
+            tokens,
+            schema: schema.clone(),
+            scratch: RefCell::new(SiteScratch::default()),
+        })
+    }
+
+    pub(crate) fn render(
+        &self,
+        header: &vcf::Header,
+        record: &vcf::variant::RecordBuf,
+        output: &mut Vec<u8>,
+    ) -> Result<()> {
+        let mut scratch = self.scratch.borrow_mut();
+        scratch.line.clear();
+        vcf::io::Writer::new(&mut scratch.line)
+            .write_variant_record(header, record)
+            .map_err(|error| {
+                RsomicsError::InvalidInput(format!(
+                    "serializing variant record for site format: {error}"
+                ))
+            })?;
+        trim_line_ending(&mut scratch.line);
+        output.clear();
+        let SiteScratch {
+            line,
+            columns,
+            sample_values,
+        } = &mut *scratch;
+        crate::query::render_site(
+            &self.tokens,
+            &self.schema,
+            line,
+            columns,
+            sample_values,
+            output,
+        )
+    }
+}
+
+pub(crate) fn validate(tokens: &[Token], schema: &HeaderTypes, in_samples: bool) -> Result<()> {
+    for token in tokens {
+        match token {
+            Token::Literal(_) => {}
+            Token::Samples(inner) => validate(inner, schema, true)?,
+            Token::Field { field, .. } => match field {
+                Field::InfoTag(name) if schema.info(name).is_none() => {
+                    return Err(no_tag("INFO", name));
+                }
+                Field::Named(name) if in_samples => {
+                    if schema.format(name).is_none() && !is_fixed(name) {
+                        return Err(no_tag("FORMAT", name));
+                    }
+                }
+                Field::Named(name) if schema.info(name).is_none() => {
+                    return Err(no_tag("INFO", name));
+                }
+                Field::Fixed(name) if !is_fixed(name) => {
+                    return Err(invalid("unknown fixed VCF field"));
+                }
+                Field::Vkey => {
+                    return Err(invalid("%VKX is not enabled in the current query engine"));
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(())
+}
+
+fn validate_site(tokens: &[Token]) -> Result<()> {
+    for token in tokens {
+        match token {
+            Token::Literal(value) if value.iter().any(u8::is_ascii_whitespace) => {
+                return Err(invalid("site format literals must not contain whitespace"));
+            }
+            Token::Literal(_) => {}
+            Token::Samples(_) => return Err(invalid("site formats do not support sample loops")),
+            Token::Field { field, .. } => match field {
+                Field::Format
+                | Field::Gt
+                | Field::IupacGt
+                | Field::Line
+                | Field::Sample
+                | Field::Tgt => {
+                    return Err(invalid(
+                        "site formats do not support sample or record fields",
+                    ));
+                }
+                Field::Fixed(name) if name == b"FORMAT" || name == b"LINE" => {
+                    return Err(invalid(
+                        "site formats do not support sample or record fields",
+                    ));
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(())
+}
+
+fn is_fixed(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"CHROM"
+            | b"POS"
+            | b"POS0"
+            | b"END"
+            | b"END0"
+            | b"ID"
+            | b"REF"
+            | b"ALT"
+            | b"FIRST_ALT"
+            | b"QUAL"
+            | b"FILTER"
+            | b"TYPE"
+            | b"LINE"
+    )
+}
+
+fn no_tag(kind: &str, name: &[u8]) -> RsomicsError {
+    RsomicsError::InvalidInput(format!(
+        "no such {kind} tag defined in the VCF header: {}",
+        String::from_utf8_lossy(name)
+    ))
 }
 
 fn parse_sequence(input: &[u8], position: &mut usize, in_samples: bool) -> Result<Vec<Token>> {
@@ -203,7 +357,25 @@ fn invalid(message: &str) -> RsomicsError {
 
 #[cfg(test)]
 mod tests {
+    use noodles_vcf::{self as vcf, variant::RecordBuf};
+
+    use crate::format::HeaderTypes;
+
     use super::*;
+
+    const HEADER: &str = "##fileformat=VCFv4.3\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+
+    fn site() -> (vcf::Header, HeaderTypes, RecordBuf) {
+        let header: vcf::Header = HEADER.parse().unwrap();
+        let schema = HeaderTypes::parse(HEADER.as_bytes()).unwrap();
+        let mut reader =
+            vcf::io::Reader::new(b"chr1\t10\trs1\tA\tC,G\t12\tPASS\tDP=7\n".as_slice());
+        let raw = reader.records().next().unwrap().unwrap();
+        let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
+        (header, schema, record)
+    }
 
     #[test]
     fn parses_site_and_sample_fields() {
@@ -249,5 +421,29 @@ mod tests {
         assert!(parse("%").is_err());
         assert!(parse("[%GT").is_err());
         assert!(parse("%SUM(FMT/AD)").is_err());
+    }
+
+    #[test]
+    fn site_format_renders_fixed_info_and_escaped_literals() {
+        let (header, schema, record) = site();
+        let format = SiteFormat::bind(
+            r"%CHROM\_%POS\_%ID\_%REF\_%ALT{1}\_%FIRST_ALT\_%QUAL\_%FILTER\_%INFO/DP\_%TYPE",
+            &schema,
+        )
+        .unwrap();
+        let mut output = Vec::new();
+
+        format.render(&header, &record, &mut output).unwrap();
+
+        assert_eq!(output, b"chr1_10_rs1_A_G_C_12_PASS_7_SNP");
+    }
+
+    #[test]
+    fn site_format_rejects_sample_fields_and_invalid_literals() {
+        let (_, schema, _) = site();
+
+        for value in ["[%GT]", "%FORMAT", "%GT", "x\\ty", "x\\ny", "", "x y"] {
+            assert!(SiteFormat::bind(value, &schema).is_err(), "{value:?}");
+        }
     }
 }
