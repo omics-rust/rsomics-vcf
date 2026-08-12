@@ -111,7 +111,7 @@ jobs:
           cargo test --locked --test compat -- --ignored
           cargo test --locked --test filter_compat -- --ignored
           cargo test --locked --test index_compat -- --ignored
-          cargo test --locked --all-features --test norm_compat -- --ignored
+          cargo test --locked --test norm_compat -- --ignored
           cargo test --locked --test query -- --ignored
           cargo test --locked --test validate_compat -- --ignored
           cargo test --locked --test view_compat -- --ignored

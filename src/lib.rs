@@ -11,7 +11,6 @@ mod commands;
 mod expression;
 mod filter;
 mod format;
-#[cfg(feature = "norm-preview")]
 mod norm;
 mod query_bcf;
 mod query_format;

@@ -37,7 +37,6 @@ enum Command {
     /// Create or inspect random-access indexes
     Index(commands::index::Arguments),
 
-    #[cfg(feature = "norm-preview")]
     /// Normalize variants against an indexed reference
     Norm(commands::norm::Arguments),
 
@@ -54,28 +53,13 @@ enum Command {
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub(crate) enum CommandOutput {
-    Filter {
-        summary: crate::filter::Summary,
-    },
-    Head {
-        summary: head::Summary,
-    },
-    Index {
-        outcome: crate::index::Outcome,
-    },
-    #[cfg(feature = "norm-preview")]
-    Norm {
-        summary: crate::norm::Summary,
-    },
-    Query {
-        summary: crate::query::Summary,
-    },
-    Validate {
-        report: crate::validate::Report,
-    },
-    View {
-        summary: crate::view::Summary,
-    },
+    Filter { summary: crate::filter::Summary },
+    Head { summary: head::Summary },
+    Index { outcome: crate::index::Outcome },
+    Norm { summary: crate::norm::Summary },
+    Query { summary: crate::query::Summary },
+    Validate { report: crate::validate::Report },
+    View { summary: crate::view::Summary },
 }
 
 #[must_use]
@@ -96,7 +80,6 @@ fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
         Command::Index(arguments) => {
             commands::index::execute(arguments, cli.output.json).map(Validation::Valid)
         }
-        #[cfg(feature = "norm-preview")]
         Command::Norm(arguments) => {
             commands::norm::execute(arguments, cli.output.json).map(Validation::Valid)
         }
@@ -142,7 +125,6 @@ mod tests {
         assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
     }
 
-    #[cfg(feature = "norm-preview")]
     #[test]
     fn norm_help_uses_family_layout() {
         let error = rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "norm", "--help"])
@@ -150,6 +132,7 @@ mod tests {
         let help = error.to_string();
         assert!(help.contains("Input VCF or BCF file"), "{help}");
         assert!(help.contains("-f, --fasta-ref <FILE>"), "{help}");
+        assert!(help.contains("-g, --gff-annot <FILE>"), "{help}");
         assert!(help.contains("-m, --split-multiallelic"), "{help}");
         assert!(help.contains("--strict-filter"), "{help}");
         assert!(help.contains("--split-overlaps <MODE>"), "{help}");

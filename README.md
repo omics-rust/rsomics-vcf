@@ -10,6 +10,8 @@ The current implementation provides:
   apply genomic masks and gap filters.
 - `index`: create and inspect CSI indexes for BGZF VCF or BCF and TBI indexes
   for BGZF VCF.
+- `norm`: normalize against an indexed reference, split, join, atomize, and
+  deduplicate variants while remapping typed INFO, FORMAT, and genotype fields.
 - `query`: project typed site, INFO, FORMAT, and genotype fields from the same
   input formats with sample selection and transactional named output.
 - `validate`: validate VCF 4.1–4.5 or BCF 2.2 structure, schema, typed values,
@@ -81,6 +83,43 @@ never shares standard output with the envelope. Expression filtering, allele
 trimming and remapping, frequency/genotype predicates, output indexing, and
 compression workers are outside this first stable `view` contract; they are
 not accepted as partially implemented flags.
+
+`norm` accepts every VCF and BCF input encoding supported by the product. It
+left-aligns and trims alleles against indexed plain or BGZF FASTA, validates or
+repairs REF mismatches, and can use GFF3 transcript orientation for HGVS
+3-prime right alignment. Multiallelic splitting and joining preserve declared
+`Number=A`, `R`, and `G` INFO and FORMAT values, genotypes, phasing, and mixed
+ploidy. Complex variants can be atomized with explicit overlap and provenance
+policies. Duplicate removal, expression-controlled transformation, indexed
+regions, streaming targets, position or lexical local sorting, transactional
+output, JSON summaries, and bounded BGZF compression workers compose with the
+same pipeline.
+
+```console
+rsomics-vcf norm -f reference.fa calls.vcf.gz -O z -o normalized.vcf.gz
+rsomics-vcf norm -m --keep-sum AD --split-overlaps missing calls.bcf
+rsomics-vcf norm --join-multiallelic any --strict-filter calls.vcf
+rsomics-vcf norm -f reference.fa -g transcripts.gff3.gz calls.vcf
+```
+
+Malformed allele-indexed fields fail instead of being silently discarded.
+Automatic output indexing is intentionally excluded until the output and index
+can be committed as one transaction.
+
+The normalization release benchmark compares exact record bodies with
+bcftools 1.24 before timing. It ran on an Apple M2 Mac mini with 8 GB RAM and
+macOS 26.6.1, using three warmups and ten measured runs:
+
+| Workload | Records | rsomics-vcf | bcftools | Throughput result |
+|---|---:|---:|---:|---:|
+| Reference-guided indel alignment | 500,000 | 0.920 ± 0.008 s | 1.170 ± 0.017 s | 1.27× faster |
+| Typed eight-sample multiallelic split | 200,000 input, 400,000 output | 5.457 ± 0.061 s | 7.456 ± 0.047 s | 1.37× faster |
+
+A single `/usr/bin/time -lp` run reported 6,799,360 versus 7,012,352 bytes RSS
+for reference alignment, and 10,518,528 versus 8,437,760 bytes for typed
+splitting. The committed `benchmarks/norm-vs-bcftools.sh` harness generates the
+fixtures, verifies body equality, records hashes and machine provenance, and
+captures the complete timing distributions.
 
 `filter` evaluates the product's typed expression language over fixed, INFO,
 FORMAT, genotype, calculated, arithmetic, logical, regex, file-set, and
