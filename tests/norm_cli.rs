@@ -279,3 +279,45 @@ chr1\t50\t.\tCC\tC,GG\t.\tPASS\t.\tGT\t1/2\n",
     assert!(output.contains("CC\tC\t.\tPASS\t.\tGT\t1/."), "{output}");
     assert!(!output.contains("*"), "{output}");
 }
+
+#[test]
+fn public_command_can_trace_atoms_to_the_original_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t50\t.\tCC\tC,GG\t.\tPASS\t.\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--atomize",
+            "--old-rec-tag",
+            "ORIG",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.contains("##INFO=<ID=ORIG,Number=1,Type=String,Description=\"Original variant."),
+        "{output}"
+    );
+    assert!(
+        output.contains("C\tG,*\t.\tPASS\tORIG=chr1|50|CC|C,GG|2"),
+        "{output}"
+    );
+    assert!(
+        output.contains("CC\tC,*\t.\tPASS\tORIG=chr1|50|CC|C,GG|1"),
+        "{output}"
+    );
+}

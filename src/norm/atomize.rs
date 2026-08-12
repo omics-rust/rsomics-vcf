@@ -3,7 +3,14 @@ mod fields;
 use noodles_core::Position;
 use noodles_vcf::{
     Header,
-    variant::{RecordBuf, record_buf::AlternateBases},
+    header::record::value::{
+        Map,
+        map::{Info, info},
+    },
+    variant::{
+        RecordBuf,
+        record_buf::{AlternateBases, info::field::Value as InfoValue},
+    },
 };
 use rsomics_common::{Result, RsomicsError};
 
@@ -25,10 +32,42 @@ struct OutputAtom {
     star: bool,
 }
 
+pub(super) struct Origin<'a> {
+    pub(super) record: &'a RecordBuf,
+    pub(super) alternate: usize,
+}
+
+pub(super) fn prepare_header(header: &mut Header, tag: &str) -> Result<()> {
+    if !valid_tag(tag) {
+        return Err(RsomicsError::ConfigError(format!(
+            "invalid --old-rec-tag ID: {tag}"
+        )));
+    }
+    if let Some(schema) = header.infos().get(tag) {
+        if schema.number() != info::Number::Count(1) || schema.ty() != info::Type::String {
+            return Err(RsomicsError::ConfigError(format!(
+                "--old-rec-tag {tag} requires INFO/{tag} Number=1,Type=String"
+            )));
+        }
+    } else {
+        header.infos_mut().insert(
+            tag.to_owned(),
+            Map::<Info>::new(
+                info::Number::Count(1),
+                info::Type::String,
+                "Original variant. Format: CHR|POS|REF|ALT|USED_ALT_IDX",
+            ),
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn atomize(
     header: &Header,
-    record: RecordBuf,
+    mut record: RecordBuf,
     star_allele: bool,
+    old_record_tag: Option<&str>,
+    origin: Option<Origin<'_>>,
 ) -> Result<(Vec<RecordBuf>, bool)> {
     let alternates = record.alternate_bases().as_ref();
     let reference = record.reference_bases().as_bytes();
@@ -58,6 +97,12 @@ pub(super) fn atomize(
             .as_bytes()
             .eq_ignore_ascii_case(alternates[0].as_bytes())
     {
+        if let Some(tag) = old_record_tag.filter(|tag| record.info().get(*tag).is_none()) {
+            let source = origin.as_ref().map_or(&record, |origin| origin.record);
+            let alternate = origin.as_ref().map(|origin| origin.alternate);
+            let value = origin_value(source, &[0, 1], alternate)?;
+            insert_origin(&mut record, tag, value);
+        }
         return Ok((vec![record], false));
     }
     atoms.sort();
@@ -87,9 +132,75 @@ pub(super) fn atomize(
         *output.alternate_bases_mut() = AlternateBases::from(alternates);
         remap_genotypes(&record, &mut output, &output_atom.mapping, star_allele)?;
         extend_allele_fields(header, &mut output, has_star)?;
+        if let Some(tag) = old_record_tag {
+            let source = origin.as_ref().map_or(&record, |origin| origin.record);
+            let alternate = origin.as_ref().map(|origin| origin.alternate);
+            annotate_origin(source, &mut output, tag, &output_atom.mapping, alternate)?;
+        }
         records.push(output);
     }
     Ok((records, true))
+}
+
+fn annotate_origin(
+    source: &RecordBuf,
+    output: &mut RecordBuf,
+    tag: &str,
+    mapping: &[usize],
+    source_alternate: Option<usize>,
+) -> Result<()> {
+    if output.info().get(tag).is_some() {
+        return Ok(());
+    }
+    let value = origin_value(source, mapping, source_alternate)?;
+    insert_origin(output, tag, value);
+    Ok(())
+}
+
+fn origin_value(
+    source: &RecordBuf,
+    mapping: &[usize],
+    source_alternate: Option<usize>,
+) -> Result<String> {
+    let position = source
+        .variant_start()
+        .map(usize::from)
+        .ok_or_else(|| invalid("atomizing a record without a position"))?;
+    let alternates = source.alternate_bases().as_ref().join(",");
+    let used = source_alternate.map_or_else(
+        || {
+            mapping
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| **value == 1)
+                .map(|(index, _)| (index + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        },
+        |alternate| alternate.to_string(),
+    );
+    Ok(format!(
+        "{}|{position}|{}|{alternates}|{used}",
+        source.reference_sequence_name(),
+        source.reference_bases()
+    ))
+}
+
+fn insert_origin(output: &mut RecordBuf, tag: &str, value: String) {
+    output
+        .info_mut()
+        .insert(tag.to_owned(), Some(InfoValue::String(value)));
+}
+
+fn valid_tag(tag: &str) -> bool {
+    if tag == "1000G" {
+        return true;
+    }
+    let mut bytes = tag.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
 }
 
 fn decompose(reference: &[u8], alternate: &[u8], source_alternate: usize) -> Result<Vec<Atom>> {
@@ -258,7 +369,7 @@ mod tests {
             vcf::Record::try_from(b"chr1\t20\t.\tACGT\tAGGA\t.\tPASS\tDP=7\tGT\t1/1".as_slice())
                 .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
-        let (records, changed) = atomize(&header, record, true).unwrap();
+        let (records, changed) = atomize(&header, record, true, None, None).unwrap();
         assert!(changed);
 
         let mut writer = vcf::io::Writer::new(Vec::new());
@@ -285,7 +396,7 @@ chr1\t23\t.\tT\tA\t.\tPASS\tDP=7\tGT\t1/1\n"
             vcf::Record::try_from(b"chr1\t20\tb2\tAC\tGTG\t50\tPASS\tDP=7\tGT\t1/1".as_slice())
                 .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
-        let (records, changed) = atomize(&header, record, true).unwrap();
+        let (records, changed) = atomize(&header, record, true, None, None).unwrap();
         assert!(changed);
 
         let mut writer = vcf::io::Writer::new(Vec::new());
@@ -318,7 +429,7 @@ chr1\t21\tb2\tC\tT,*\t50\tPASS\tDP=7\tGT\t1/1\n"
         )
         .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
-        let (records, changed) = atomize(&header, record, true).unwrap();
+        let (records, changed) = atomize(&header, record, true, None, None).unwrap();
         assert!(changed);
 
         let mut writer = vcf::io::Writer::new(Vec::new());
@@ -350,7 +461,7 @@ chr1\t21\tb2\tC\tT,*\t50\tPASS\tIA=8,.;IR=10,5,.\tGT:AD:PL\t1/1:10,5,.:0,10,20,.
         )
         .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
-        let (records, changed) = atomize(&header, record, true).unwrap();
+        let (records, changed) = atomize(&header, record, true, None, None).unwrap();
         assert!(changed);
 
         let mut writer = vcf::io::Writer::new(Vec::new());

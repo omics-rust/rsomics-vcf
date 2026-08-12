@@ -321,6 +321,93 @@ chr1\t50\tm1\tCC\tC,GG\t50\tPASS\tIA=3,8;IR=10,4,6;IG=0,1,2,3,4,5\tGT:AD:PL\t1/2
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn atom_origin_trace_matches_bcftools_1_24_in_all_encodings() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t50\t.\tA\tC,G\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    let ours_text = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--atomize",
+        "--split-multiallelic",
+        "--old-rec-tag",
+        "ORIG",
+        input.to_str().unwrap(),
+    ])));
+    let oracle_text = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--atomize",
+        "-m",
+        "-any",
+        "--old-rec-tag",
+        "ORIG",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours_text, oracle_text);
+
+    for output_type in ["v", "z", "b", "u"] {
+        let ours = directory.path().join(format!("ours.{output_type}"));
+        let oracle = directory.path().join(format!("oracle.{output_type}"));
+        run(
+            Command::new(PathBuf::from(env!("CARGO_BIN_EXE_rsomics-vcf"))).args([
+                "norm",
+                "--atomize",
+                "--split-multiallelic",
+                "--old-rec-tag",
+                "ORIG",
+                "-O",
+                output_type,
+                "-o",
+                ours.to_str().unwrap(),
+                input.to_str().unwrap(),
+            ]),
+        );
+        run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "--atomize",
+            "-m",
+            "-any",
+            "--old-rec-tag",
+            "ORIG",
+            "-O",
+            output_type,
+            "-o",
+            oracle.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ]));
+        let ours = body(run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-Ov",
+            ours.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-Ov",
+            oracle.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{output_type}");
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn exhaustive_short_allele_atomization_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));

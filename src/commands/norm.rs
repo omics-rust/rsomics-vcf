@@ -75,6 +75,10 @@ pub(crate) struct Arguments {
     #[arg(long, value_name = "'*'|'.'", requires = "atomize")]
     atom_overlaps: Option<AtomOverlaps>,
 
+    /// INFO tag recording each atom's original variant and ALT index
+    #[arg(long, value_name = "TAG", requires = "atomize")]
+    old_rec_tag: Option<String>,
+
     /// Preserve FORMAT/AD depth sums while splitting
     #[arg(long, value_name = "TAG", requires = "split_multiallelic")]
     keep_sum: Option<String>,
@@ -126,6 +130,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
         atomize: arguments.atomize,
         atom_overlaps_star: !matches!(arguments.atom_overlaps, Some(AtomOverlaps::Missing)),
+        old_record_tag: arguments.old_rec_tag,
         keep_sum_ad: arguments.keep_sum.is_some(),
         output_format: arguments.output_type.into(),
         site_window: arguments.site_window,

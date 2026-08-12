@@ -8,11 +8,13 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use noodles_vcf::{Header, variant::RecordBuf};
+use noodles_vcf::{Header, variant::RecordBuf, variant::io::Write as _};
 use rsomics_common::{Result, RsomicsError};
 use serde::Serialize;
 
-use crate::format::{HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer};
+use crate::format::{
+    HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer, trim_line_ending,
+};
 pub(crate) use reference::MismatchPolicy;
 use reference::{Outcome, ReferenceNormalizer};
 
@@ -23,6 +25,7 @@ pub(crate) struct Options {
     pub(crate) mismatch_policy: MismatchPolicy,
     pub(crate) atomize: bool,
     pub(crate) atom_overlaps_star: bool,
+    pub(crate) old_record_tag: Option<String>,
     pub(crate) keep_sum_ad: bool,
     pub(crate) output_format: OutputFormat,
     pub(crate) site_window: usize,
@@ -83,7 +86,10 @@ pub(crate) fn write(input: &Path, options: &Options, output: impl Write) -> Resu
     }
 
     let mut reader = Reader::open(input)?;
-    let (header, _, _) = reader.read_header()?;
+    let (mut header, _, _) = reader.read_header()?;
+    if let Some(tag) = options.old_record_tag.as_deref() {
+        atomize::prepare_header(&mut header, tag)?;
+    }
     let mut writer = Writer::new(output, options.output_format);
     writer.write_header(&header, HeaderMode::Full)?;
     let summary = normalize_stream(&mut reader, &header, options, &mut writer)?;
@@ -143,6 +149,8 @@ fn normalize_stream(
             .ok_or_else(|| invalid(number, "variant position is missing"))?;
         validate_input_order(number, reference, position, &mut input_position, &mut seen)?;
 
+        let origin = (options.split_multiallelic && options.old_record_tag.is_some())
+            .then(|| record.clone());
         let records = if options.split_multiallelic {
             split::split(header, &record, options.keep_sum_ad)?
         } else {
@@ -151,7 +159,7 @@ fn normalize_stream(
         if records.len() > 1 {
             summary.split += 1;
         }
-        for mut record in records {
+        for (split_index, mut record) in records.into_iter().enumerate() {
             if let Some(normalizer) = &mut normalizer {
                 match normalizer.normalize(&mut record)? {
                     Outcome::Changed => summary.changed += 1,
@@ -164,7 +172,16 @@ fn normalize_stream(
                 }
             }
             let (records, atomized) = if options.atomize {
-                atomize::atomize(header, record, options.atom_overlaps_star)?
+                atomize::atomize(
+                    header,
+                    record,
+                    options.atom_overlaps_star,
+                    options.old_record_tag.as_deref(),
+                    origin.as_ref().map(|record| atomize::Origin {
+                        record,
+                        alternate: split_index + 1,
+                    }),
+                )?
             } else {
                 (vec![record], false)
             };
@@ -197,8 +214,8 @@ fn normalize_stream(
             &mut pending,
             header,
             writer,
-            reference,
-            threshold,
+            options.old_record_tag.as_deref(),
+            (reference, threshold),
             &mut output_position,
             &mut summary,
         )?;
@@ -208,6 +225,7 @@ fn normalize_stream(
         &mut pending,
         header,
         writer,
+        options.old_record_tag.as_deref(),
         &mut output_position,
         &mut summary,
     )?;
@@ -242,17 +260,24 @@ fn flush_ready(
     pending: &mut BinaryHeap<Reverse<Pending>>,
     header: &Header,
     writer: &mut impl VariantWriter,
-    reference: usize,
-    threshold: usize,
+    old_record_tag: Option<&str>,
+    through: (usize, usize),
     output_position: &mut Option<(usize, usize)>,
     summary: &mut Summary,
 ) -> Result<()> {
     while pending.peek().is_some_and(|Reverse(record)| {
-        record.reference < reference
-            || (record.reference == reference && record.position <= threshold)
+        record.reference < through.0
+            || (record.reference == through.0 && record.position <= through.1)
     }) {
         let Reverse(record) = pending.pop().unwrap();
-        write_pending(record, header, writer, output_position, summary)?;
+        write_pending(
+            record,
+            header,
+            writer,
+            old_record_tag,
+            output_position,
+            summary,
+        )?;
     }
     Ok(())
 }
@@ -261,11 +286,19 @@ fn flush_all(
     pending: &mut BinaryHeap<Reverse<Pending>>,
     header: &Header,
     writer: &mut impl VariantWriter,
+    old_record_tag: Option<&str>,
     output_position: &mut Option<(usize, usize)>,
     summary: &mut Summary,
 ) -> Result<()> {
     while let Some(Reverse(record)) = pending.pop() {
-        write_pending(record, header, writer, output_position, summary)?;
+        write_pending(
+            record,
+            header,
+            writer,
+            old_record_tag,
+            output_position,
+            summary,
+        )?;
     }
     Ok(())
 }
@@ -274,6 +307,7 @@ fn write_pending(
     pending: Pending,
     header: &Header,
     writer: &mut impl VariantWriter,
+    old_record_tag: Option<&str>,
     output_position: &mut Option<(usize, usize)>,
     summary: &mut Summary,
 ) -> Result<()> {
@@ -284,9 +318,72 @@ fn write_pending(
             "normalized position exceeds --site-window; increase the window",
         ));
     }
-    writer.write_record(header, &pending.record, pending.serial + 1)?;
+    let number = pending.serial + 1;
+    if let Some(tag) = old_record_tag
+        .filter(|tag| writer.supports_vcf_records() && pending.record.info().get(*tag).is_some())
+    {
+        let mut record = Vec::new();
+        noodles_vcf::io::Writer::new(&mut record)
+            .write_variant_record(header, &pending.record)
+            .map_err(|error| {
+                RsomicsError::Io(std::io::Error::new(
+                    error.kind(),
+                    format!("rendering variant record {number}: {error}"),
+                ))
+            })?;
+        trim_line_ending(&mut record);
+        restore_origin_commas(&mut record, tag)?;
+        writer.write_vcf_record(&record, number)?;
+    } else {
+        writer.write_record(header, &pending.record, number)?;
+    }
     *output_position = Some(position);
     summary.written += 1;
+    Ok(())
+}
+
+fn restore_origin_commas(record: &mut Vec<u8>, tag: &str) -> Result<()> {
+    let info_start = record
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\t')
+        .nth(6)
+        .map(|(index, _)| index + 1)
+        .ok_or_else(|| {
+            RsomicsError::InvalidInput("rendered VCF record has no INFO field".to_owned())
+        })?;
+    let info_end = record[info_start..]
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .map_or(record.len(), |offset| info_start + offset);
+    let prefix = format!("{tag}=");
+    let mut field_start = info_start;
+    let (value_start, value_end) = loop {
+        let field_end = record[field_start..info_end]
+            .iter()
+            .position(|byte| *byte == b';')
+            .map_or(info_end, |offset| field_start + offset);
+        if record[field_start..field_end].starts_with(prefix.as_bytes()) {
+            break (field_start + prefix.len(), field_end);
+        }
+        if field_end == info_end {
+            return Err(RsomicsError::InvalidInput(format!(
+                "rendered VCF record is missing INFO/{tag}"
+            )));
+        }
+        field_start = field_end + 1;
+    };
+    let mut restored = Vec::with_capacity(record.len());
+    restored.extend_from_slice(&record[..value_start]);
+    let mut remaining = &record[value_start..value_end];
+    while let Some(offset) = remaining.windows(3).position(|window| window == b"%2C") {
+        restored.extend_from_slice(&remaining[..offset]);
+        restored.push(b',');
+        remaining = &remaining[offset + 3..];
+    }
+    restored.extend_from_slice(remaining);
+    restored.extend_from_slice(&record[value_end..]);
+    *record = restored;
     Ok(())
 }
 
@@ -328,6 +425,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
             atom_overlaps_star: true,
+            old_record_tag: None,
             keep_sum_ad: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
@@ -366,6 +464,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
             atom_overlaps_star: true,
+            old_record_tag: None,
             keep_sum_ad: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
