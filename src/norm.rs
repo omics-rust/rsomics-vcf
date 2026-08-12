@@ -14,6 +14,8 @@ use noodles_vcf::{Header, variant::RecordBuf, variant::io::Write as _};
 use rsomics_common::{Result, RsomicsError};
 use serde::Serialize;
 
+use crate::expression::Compiled;
+use crate::filter::Logic;
 use crate::format::{
     HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer, trim_line_ending,
 };
@@ -25,6 +27,8 @@ use reference::{Outcome, ReferenceNormalizer};
 #[derive(Clone, Debug)]
 pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
+    pub(crate) expression: Option<String>,
+    pub(crate) expression_logic: Logic,
     pub(crate) split_multiallelic: bool,
     pub(crate) join_multiallelic: Option<JoinPolicy>,
     pub(crate) strict_filter: bool,
@@ -48,6 +52,7 @@ pub(crate) struct Summary {
     pub(crate) unsupported: u64,
     pub(crate) split: u64,
     pub(crate) joined: u64,
+    pub(crate) not_selected: u64,
     pub(crate) skipped: u64,
     pub(crate) atomized: u64,
     pub(crate) duplicates: u64,
@@ -59,6 +64,7 @@ struct Pending {
     position: usize,
     serial: u64,
     input: u64,
+    selected: bool,
     record: RecordBuf,
 }
 
@@ -111,9 +117,24 @@ pub(crate) fn write(input: &Path, options: &Options, output: impl Write) -> Resu
     if let Some(tag) = options.old_record_tag.as_deref() {
         atomize::prepare_header(&mut header, tag)?;
     }
+    let expression = options
+        .expression
+        .as_deref()
+        .map(|source| {
+            Compiled::bind(source, &header).map_err(|error| {
+                RsomicsError::ConfigError(format!("invalid norm expression: {error}"))
+            })
+        })
+        .transpose()?;
     let mut writer = Writer::new(output, options.output_format);
     writer.write_header(&header, HeaderMode::Full)?;
-    let summary = normalize_stream(&mut reader, &header, options, &mut writer)?;
+    let summary = normalize_stream(
+        &mut reader,
+        &header,
+        options,
+        expression.as_ref(),
+        &mut writer,
+    )?;
     writer.finish()?;
     Ok(summary)
 }
@@ -122,6 +143,7 @@ fn normalize_stream(
     reader: &mut Reader,
     header: &Header,
     options: &Options,
+    expression: Option<&Compiled>,
     writer: &mut impl VariantWriter,
 ) -> Result<Summary> {
     let reference_order: HashMap<_, _> = header
@@ -158,6 +180,7 @@ fn normalize_stream(
         unsupported: 0,
         split: 0,
         joined: 0,
+        not_selected: 0,
         skipped: 0,
         atomized: 0,
         duplicates: 0,
@@ -181,9 +204,19 @@ fn normalize_stream(
             .ok_or_else(|| invalid(number, "variant position is missing"))?;
         validate_input_order(number, reference, position, &mut input_position, &mut seen)?;
 
-        let origin = (options.split_multiallelic && options.old_record_tag.is_some())
+        let selected = expression
+            .map(|expression| {
+                expression
+                    .evaluate(header, &record)
+                    .map(|truth| options.expression_logic.accepts(truth.site_passes()))
+                    .map_err(|error| invalid(number, &format!("evaluating expression: {error}")))
+            })
+            .transpose()?
+            .unwrap_or(true);
+        summary.not_selected += u64::from(!selected);
+        let origin = (selected && options.split_multiallelic && options.old_record_tag.is_some())
             .then(|| record.clone());
-        let records = if options.split_multiallelic {
+        let records = if selected && options.split_multiallelic {
             split::split(
                 header,
                 &record,
@@ -193,11 +226,11 @@ fn normalize_stream(
         } else {
             vec![record]
         };
-        if records.len() > 1 {
+        if selected && records.len() > 1 {
             summary.split += 1;
         }
         for (split_index, mut record) in records.into_iter().enumerate() {
-            if let Some(normalizer) = &mut normalizer {
+            if selected && let Some(normalizer) = &mut normalizer {
                 match normalizer.normalize(&mut record)? {
                     Outcome::Changed => summary.changed += 1,
                     Outcome::Unchanged => summary.unchanged += 1,
@@ -208,7 +241,7 @@ fn normalize_stream(
                     }
                 }
             }
-            let (records, atomized) = if options.atomize {
+            let (records, atomized) = if selected && options.atomize {
                 atomize::atomize(
                     header,
                     record,
@@ -233,6 +266,7 @@ fn normalize_stream(
                     position: normalized_position,
                     serial,
                     input: number,
+                    selected,
                     record,
                 }));
                 serial = serial.checked_add(1).ok_or_else(|| {
@@ -343,22 +377,34 @@ fn write_coordinate(
     state: &mut OutputState,
     summary: &mut Summary,
 ) -> Result<()> {
-    if let Some(policy) = options.join_multiallelic.filter(|_| records.len() > 1) {
+    let selected_indices = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| record.selected.then_some(index))
+        .collect::<Vec<_>>();
+    if let Some(policy) = options
+        .join_multiallelic
+        .filter(|_| selected_indices.len() > 1)
+    {
         let (joined, count) = merge::join(
             policy,
             options.strict_filter,
             header,
-            records.iter().map(|record| &record.record),
+            selected_indices.iter().map(|index| &records[*index].record),
         )?;
         let mut sources = records.into_iter().map(Some).collect::<Vec<_>>();
-        records = joined
+        let merged = joined
             .into_iter()
             .map(|(index, record)| {
-                let mut pending = sources[index].take().unwrap();
+                let mut pending = sources[selected_indices[index]].take().unwrap();
                 pending.record = record;
                 pending
             })
-            .collect();
+            .collect::<Vec<_>>();
+        for index in selected_indices {
+            sources[index] = None;
+        }
+        records = sources.into_iter().flatten().chain(merged).collect();
         summary.joined += count;
     }
     for record in records {
@@ -389,7 +435,7 @@ fn write_pending(
             "normalized position exceeds --site-window; increase the window",
         ));
     }
-    if state.duplicates.remove(position, &pending.record) {
+    if pending.selected && state.duplicates.remove(position, &pending.record) {
         summary.duplicates += 1;
         return Ok(());
     }
@@ -496,6 +542,8 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
         let (_directory, reference, input) = fixture();
         let options = Options {
             reference: Some(reference),
+            expression: None,
+            expression_logic: Logic::Include,
             split_multiallelic: false,
             join_multiallelic: None,
             strict_filter: false,
@@ -539,6 +587,8 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
         .unwrap();
         let options = Options {
             reference: Some(reference),
+            expression: None,
+            expression_logic: Logic::Include,
             split_multiallelic: false,
             join_multiallelic: None,
             strict_filter: false,

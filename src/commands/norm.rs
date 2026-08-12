@@ -6,6 +6,7 @@ use rsomics_common::{Result, RsomicsError, write_atomic};
 
 use crate::cli::CommandOutput;
 use crate::commands::variant::OutputType;
+use crate::filter::Logic;
 use crate::norm::{self, MismatchPolicy, Options};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -151,6 +152,14 @@ pub(crate) struct Arguments {
     #[arg(long, value_name = "MODE", requires = "reference")]
     check_ref: Option<CheckReference>,
 
+    /// Do not normalize records for which EXPR is true
+    #[arg(short = 'e', long, value_name = "EXPR", conflicts_with = "include")]
+    exclude: Option<String>,
+
+    /// Normalize only records for which EXPR is true
+    #[arg(short = 'i', long, value_name = "EXPR")]
+    include: Option<String>,
+
     /// Write normalized variants to this file instead of standard output
     #[arg(
         short = 'o',
@@ -192,8 +201,15 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
                 .to_owned(),
         ));
     }
+    let (expression, expression_logic) = if let Some(expression) = arguments.include {
+        (Some(expression), Logic::Include)
+    } else {
+        (arguments.exclude, Logic::Exclude)
+    };
     let options = Options {
         reference: arguments.reference,
+        expression,
+        expression_logic,
         split_multiallelic: arguments.split_multiallelic,
         join_multiallelic: arguments.join_multiallelic.map(Into::into),
         strict_filter: arguments.strict_filter,

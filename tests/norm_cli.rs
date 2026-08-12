@@ -122,6 +122,76 @@ chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.25,0.5\tGT\t1/2\n",
 }
 
 #[test]
+fn expression_selection_limits_transformation_without_dropping_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\tselected\tA\tC,G\t.\tPASS\tDP=20\n\
+chr1\t20\tunchanged\tA\tC,G\t.\tPASS\tDP=5\n",
+    )
+    .unwrap();
+
+    for (argument, expression) in [("--include", "INFO/DP>=10"), ("--exclude", "INFO/DP<10")] {
+        let output = Command::new(binary())
+            .args([
+                "norm",
+                "--split-multiallelic",
+                argument,
+                expression,
+                input.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = String::from_utf8(output.stdout).unwrap();
+        let records = output
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        assert!(records[0].contains("\tselected\tA\tC\t"), "{output}");
+        assert!(records[1].contains("\tselected\tA\tG\t"), "{output}");
+        assert!(records[2].contains("\tunchanged\tA\tC,G\t"), "{output}");
+    }
+}
+
+#[test]
+fn invalid_norm_expression_fails_before_writing_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\t.\tA\tC,G\t.\tPASS\t.\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--split-multiallelic",
+            "--include",
+            "INFO/UNKNOWN > 1",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid norm expression"));
+}
+
+#[test]
 fn public_command_joins_biallelic_snps_and_indels() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.vcf");
@@ -203,6 +273,53 @@ chr1\t30\tc\tA\tT\t.\ts20\t.\n",
         .map(|line| line.split('\t').nth(6).unwrap().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(filters, ["PASS", "q10", "s20"]);
+}
+
+#[test]
+fn expression_selected_join_preserves_coordinate_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tA\tC\t.\tPASS\tDP=10\n\
+chr1\t10\tc\tA\tT\t.\tPASS\tDP=20\n\
+chr1\t20\tb\tA\tG\t.\tPASS\tDP=0\n\
+chr1\t30\td\tA\tC\t.\tPASS\tDP=10\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--join-multiallelic",
+            "any",
+            "--include",
+            "INFO/DP>=10",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let positions = records
+        .iter()
+        .map(|line| line.split('\t').nth(1).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(positions, ["10", "20", "30"]);
+    assert!(records[0].contains("\ta;c\tA\tC,T\t"));
+    assert!(records[1].contains("\tb\tA\tG\t"));
 }
 
 #[test]

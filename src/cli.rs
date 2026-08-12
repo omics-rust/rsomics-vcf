@@ -159,6 +159,8 @@ mod tests {
         assert!(help.contains("--remove-duplicates <POLICY>"), "{help}");
         assert!(help.contains("--keep-sum <TAG>"), "{help}");
         assert!(help.contains("--check-ref <MODE>"), "{help}");
+        assert!(help.contains("-i, --include <EXPR>"), "{help}");
+        assert!(help.contains("-e, --exclude <EXPR>"), "{help}");
         assert!(help.contains("-w, --site-window <INT>"), "{help}");
         assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
     }

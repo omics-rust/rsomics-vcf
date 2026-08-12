@@ -132,6 +132,49 @@ chr1\t10\t.\tA\tC,G\t.\tPASS\tIA=10,20;IR=5,3,2;IG=0,10,20,30,40,50\tGT:FA:FR:FG
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn expression_selected_split_matches_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\tselected\tA\tC,G\t.\tPASS\tDP=20\n\
+chr1\t20\tunchanged\tA\tC,G\t.\tPASS\tDP=5\n",
+    )
+    .unwrap();
+
+    for (argument, expression) in [("--include", "INFO/DP>=10"), ("--exclude", "INFO/DP<10")] {
+        let ours = body(run(Command::new(PathBuf::from(env!(
+            "CARGO_BIN_EXE_rsomics-vcf"
+        )))
+        .args([
+            "norm",
+            "--split-multiallelic",
+            argument,
+            expression,
+            input.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "-m",
+            "-any",
+            argument,
+            expression,
+            input.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{argument}");
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn typed_biallelic_join_any_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
@@ -312,6 +355,66 @@ chr1\t30\tc\tA\tT\t.\ts20\t.\n",
         input.to_str().unwrap(),
     ])));
     assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn expression_selected_join_matches_bcftools_records() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tA\tC\t.\tPASS\tDP=10\n\
+chr1\t10\tc\tA\tT\t.\tPASS\tDP=20\n\
+chr1\t20\tb\tA\tG\t.\tPASS\tDP=0\n\
+chr1\t30\td\tA\tC\t.\tPASS\tDP=10\n",
+    )
+    .unwrap();
+
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--join-multiallelic",
+        "any",
+        "--include",
+        "INFO/DP>=10",
+        input.to_str().unwrap(),
+    ])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "-m",
+        "+any",
+        "--include",
+        "INFO/DP>=10",
+        input.to_str().unwrap(),
+    ])));
+    let mut ours_records = ours.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    let mut oracle_records = oracle.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    ours_records.sort_unstable();
+    oracle_records.sort_unstable();
+    assert_eq!(ours_records, oracle_records);
+    let positions = ours
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            std::str::from_utf8(line)
+                .unwrap()
+                .split('\t')
+                .nth(1)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(positions, ["10", "20", "30"]);
 }
 
 #[test]
