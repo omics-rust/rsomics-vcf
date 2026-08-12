@@ -37,6 +37,11 @@ enum SplitOverlaps {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum JoinMultiallelic {
+    Any,
+}
+
 impl From<RemoveDuplicates> for norm::DuplicatePolicy {
     fn from(value: RemoveDuplicates) -> Self {
         match value {
@@ -96,6 +101,10 @@ pub(crate) struct Arguments {
     #[arg(short = 'm', long)]
     split_multiallelic: bool,
 
+    /// Join records at the same position into multiallelic records
+    #[arg(long, value_name = "MODE", conflicts_with = "split_multiallelic")]
+    join_multiallelic: Option<JoinMultiallelic>,
+
     /// Replacement for non-selected ALT alleles while splitting
     #[arg(long, value_name = "MODE", requires = "split_multiallelic")]
     split_overlaps: Option<SplitOverlaps>,
@@ -146,11 +155,12 @@ pub(crate) struct Arguments {
 pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput> {
     if arguments.reference.is_none()
         && !arguments.split_multiallelic
+        && arguments.join_multiallelic.is_none()
         && !arguments.atomize
         && arguments.remove_duplicates.is_none()
     {
         return Err(RsomicsError::ConfigError(
-            "norm requires --fasta-ref, --split-multiallelic, --atomize, --remove-duplicates, or a combination".to_owned(),
+            "norm requires --fasta-ref, --split-multiallelic, --join-multiallelic, --atomize, --remove-duplicates, or a combination".to_owned(),
         ));
     }
     if arguments.keep_sum.as_deref().is_some_and(|tag| tag != "AD") {
@@ -167,6 +177,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
     let options = Options {
         reference: arguments.reference,
         split_multiallelic: arguments.split_multiallelic,
+        join_multiallelic: arguments.join_multiallelic.is_some(),
         split_overlaps_missing: matches!(arguments.split_overlaps, Some(SplitOverlaps::Missing)),
         mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
         atomize: arguments.atomize,

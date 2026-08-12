@@ -122,6 +122,101 @@ chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.25,0.5\tGT\t1/2\n",
 }
 
 #[test]
+fn public_command_joins_biallelic_snps_and_indels() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ts\tA\tC\t10\tPASS\t.\n\
+chr1\t10\td\tAT\tA\t20\tPASS\t.\n\
+chr1\t20\tx\tG\tA\t.\tPASS\t.\n\
+chr1\t20\ty\tG\tT\t.\tPASS\t.\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--join-multiallelic",
+            "any",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.contains("chr1\t10\ts;d\tAT\tCT,A\t20\tPASS\t."),
+        "{output}"
+    );
+    assert!(
+        output.contains("chr1\t20\tx;y\tG\tA,T\t.\tPASS\t."),
+        "{output}"
+    );
+}
+
+#[test]
+fn join_rejects_incompatible_reference_alleles() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tA\tC\t.\tPASS\t.\n\
+chr1\t10\tt\tT\tG\t.\tPASS\t.\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--join-multiallelic",
+            "any",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot join incompatible REF alleles")
+    );
+}
+
+#[test]
+fn join_rejects_invalid_allele_field_cardinality() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Count\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tA\tC\t.\tPASS\tAC=1,2\n\
+chr1\t10\tt\tA\tG\t.\tPASS\tAC=3\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--join-multiallelic",
+            "any",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("INFO/AC has 2 values, expected 1"));
+}
+
+#[test]
 fn public_command_can_use_missing_for_split_overlaps() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.vcf");

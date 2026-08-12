@@ -1,6 +1,7 @@
 mod atomize;
 mod cardinality;
 mod duplicate;
+mod merge;
 mod reference;
 mod split;
 
@@ -24,6 +25,7 @@ use reference::{Outcome, ReferenceNormalizer};
 pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
     pub(crate) split_multiallelic: bool,
+    pub(crate) join_multiallelic: bool,
     pub(crate) split_overlaps_missing: bool,
     pub(crate) mismatch_policy: MismatchPolicy,
     pub(crate) atomize: bool,
@@ -43,6 +45,7 @@ pub(crate) struct Summary {
     pub(crate) unchanged: u64,
     pub(crate) unsupported: u64,
     pub(crate) split: u64,
+    pub(crate) joined: u64,
     pub(crate) skipped: u64,
     pub(crate) atomized: u64,
     pub(crate) duplicates: u64,
@@ -60,6 +63,11 @@ struct Pending {
 struct OutputState {
     position: Option<(usize, usize)>,
     duplicates: duplicate::State,
+}
+
+struct OutputOptions<'a> {
+    old_record_tag: Option<&'a str>,
+    join_multiallelic: bool,
 }
 
 impl PartialEq for Pending {
@@ -133,6 +141,10 @@ fn normalize_stream(
         position: None,
         duplicates: duplicate::State::new(options.duplicate_policy),
     };
+    let output_options = OutputOptions {
+        old_record_tag: options.old_record_tag.as_deref(),
+        join_multiallelic: options.join_multiallelic,
+    };
     let mut serial = 0;
     let mut summary = Summary {
         read: 0,
@@ -141,6 +153,7 @@ fn normalize_stream(
         unchanged: 0,
         unsupported: 0,
         split: 0,
+        joined: 0,
         skipped: 0,
         atomized: 0,
         duplicates: 0,
@@ -229,7 +242,7 @@ fn normalize_stream(
             &mut pending,
             header,
             writer,
-            options.old_record_tag.as_deref(),
+            &output_options,
             (reference, threshold),
             &mut output_state,
             &mut summary,
@@ -240,7 +253,7 @@ fn normalize_stream(
         &mut pending,
         header,
         writer,
-        options.old_record_tag.as_deref(),
+        &output_options,
         &mut output_state,
         &mut summary,
     )?;
@@ -275,7 +288,7 @@ fn flush_ready(
     pending: &mut BinaryHeap<Reverse<Pending>>,
     header: &Header,
     writer: &mut impl VariantWriter,
-    old_record_tag: Option<&str>,
+    options: &OutputOptions<'_>,
     through: (usize, usize),
     state: &mut OutputState,
     summary: &mut Summary,
@@ -284,8 +297,8 @@ fn flush_ready(
         record.reference < through.0
             || (record.reference == through.0 && record.position <= through.1)
     }) {
-        let Reverse(record) = pending.pop().unwrap();
-        write_pending(record, header, writer, old_record_tag, state, summary)?;
+        let records = pop_coordinate(pending);
+        write_coordinate(records, header, writer, options, state, summary)?;
     }
     Ok(())
 }
@@ -294,12 +307,53 @@ fn flush_all(
     pending: &mut BinaryHeap<Reverse<Pending>>,
     header: &Header,
     writer: &mut impl VariantWriter,
-    old_record_tag: Option<&str>,
+    options: &OutputOptions<'_>,
     state: &mut OutputState,
     summary: &mut Summary,
 ) -> Result<()> {
-    while let Some(Reverse(record)) = pending.pop() {
-        write_pending(record, header, writer, old_record_tag, state, summary)?;
+    while !pending.is_empty() {
+        let records = pop_coordinate(pending);
+        write_coordinate(records, header, writer, options, state, summary)?;
+    }
+    Ok(())
+}
+
+fn pop_coordinate(pending: &mut BinaryHeap<Reverse<Pending>>) -> Vec<Pending> {
+    let Reverse(first) = pending.pop().unwrap();
+    let coordinate = (first.reference, first.position);
+    let mut records = vec![first];
+    while pending
+        .peek()
+        .is_some_and(|Reverse(record)| (record.reference, record.position) == coordinate)
+    {
+        records.push(pending.pop().unwrap().0);
+    }
+    records
+}
+
+fn write_coordinate(
+    mut records: Vec<Pending>,
+    header: &Header,
+    writer: &mut impl VariantWriter,
+    options: &OutputOptions<'_>,
+    state: &mut OutputState,
+    summary: &mut Summary,
+) -> Result<()> {
+    if options.join_multiallelic && records.len() > 1 {
+        let joined = merge::join(header, records.iter().map(|record| &record.record))?;
+        records[0].record = joined;
+        records.truncate(1);
+        summary.joined += 1;
+    }
+    for record in records {
+        write_pending(
+            record,
+            header,
+            writer,
+            options.old_record_tag,
+            state,
+            summary,
+        )?;
     }
     Ok(())
 }
@@ -427,6 +481,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
         let options = Options {
             reference: Some(reference),
             split_multiallelic: false,
+            join_multiallelic: false,
             split_overlaps_missing: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
@@ -468,6 +523,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
         let options = Options {
             reference: Some(reference),
             split_multiallelic: false,
+            join_multiallelic: false,
             split_overlaps_missing: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,

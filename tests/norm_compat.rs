@@ -132,6 +132,144 @@ chr1\t10\t.\tA\tC,G\t.\tPASS\tIA=10,20;IR=5,3,2;IG=0,10,20,30,40,50\tGT:FA:FR:FG
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn typed_biallelic_join_any_matches_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##FILTER=<ID=q10,Description=\"Low quality\">\n\
+##INFO=<ID=IA,Number=A,Type=Integer,Description=\"A\">\n\
+##INFO=<ID=IR,Number=R,Type=Float,Description=\"R\">\n\
+##INFO=<ID=IG,Number=G,Type=String,Description=\"G\">\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=FA,Number=A,Type=Integer,Description=\"A\">\n\
+##FORMAT=<ID=FR,Number=R,Type=Float,Description=\"R\">\n\
+##FORMAT=<ID=FG,Number=G,Type=String,Description=\"G\">\n\
+##FORMAT=<ID=NG,Number=G,Type=Integer,Description=\"G\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t10\tc\tA\tC\t10\tq10\tIA=10;IR=5.0,3.0;IG=r,rc,cc;DP=7\tGT:FA:FR:FG\t0/1:11:7.0,4.0:r,rc,cc\t./1:12:8.0,5.0:R,RC,CC\n\
+chr1\t10\tg\tA\tG\t20\tPASS\tIA=20;IR=6.0,2.0;IG=s,sg,gg;DP=9\tGT:FA:FR:FG\t1/0:21:9.0,3.0:s,sg,gg\t0/1:22:10.0,6.0:S,SG,GG\n\
+chr1\t20\tt\tC\tT\t30\tPASS\tIA=30;IR=7.0,1.0;IG=x,xt,tt;DP=11\tGT:FA:FR:FG\t0/1:31:11.0,2.0:x,xt,tt\t0/0:32:12.0,1.0:X,XT,TT\n\
+chr1\t30\tlo\ta\tc\t.\tPASS\t.\tGT\t0/1\t0/0\n\
+chr1\t30\tup\tA\tG\t.\tPASS\t.\tGT\t1/0\t0/1\n\
+chr1\t40\tb\tA\tA]chr1:80]\t.\tPASS\t.\tGT\t0/1\t0/0\n\
+chr1\t40\td\tAT\tA\t.\tPASS\t.\tGT\t1/0\t0/1\n\
+chr1\t50\th\tA\tC\t.\tPASS\t.\tGT:NG:FG\t1:10,11:h0,h1\t0:30,31:H0,H1\n\
+chr1\t50\td\tA\tG\t.\tPASS\t.\tGT:NG:FG\t0/1:20,21,22:d0,d1,d2\t0/1:40,41,42:D0,D1,D2\n\
+chr1\t60\td\tA\tC\t.\tPASS\t.\tGT:NG:FG\t0/1:10,11,12:d0,d1,d2\t0/0:30,31,32:D0,D1,D2\n\
+chr1\t60\th\tA\tG\t.\tPASS\t.\tGT:NG:FG\t1:20,21:h0,h1\t0:40,41:H0,H1\n",
+    )
+    .unwrap();
+
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "-m",
+        "+any",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(
+        oracle,
+        b"chr1\t10\tc;g\tA\tC,G\t20\tq10\tIA=10,20;IR=6,3,2;IG=r,rc,cc,sg,.,gg;DP=7\tGT:FA:FR:FG\t2/1:11,21:9,4,3:r,rc,cc,sg,.,gg\t2/1:12,22:10,5,6:R,RC,CC,SG,.,GG\n\
+chr1\t20\tt\tC\tT\t30\tPASS\tIA=30;IR=7,1;IG=x,xt,tt;DP=11\tGT:FA:FR:FG\t0/1:31:11,2:x,xt,tt\t0/0:32:12,1:X,XT,TT\n\
+chr1\t30\tlo;up\tA\tC,G\t.\tPASS\t.\tGT\t2/1\t0/2\n\
+chr1\t40\tb;d\tAT\tA]chr1:80]T,A\t.\tPASS\t.\tGT\t2/1\t0/2\n\
+chr1\t50\th;d\tA\tC,G\t.\tPASS\t.\tGT:NG:FG\t1/2:20,11,.,21,.,22:h0,h1,d1\t0/2:40,31,.,41,.,42:H0,H1,D1\n\
+chr1\t60\td;h\tA\tC,G\t.\tPASS\t.\tGT:NG:FG\t2/1:20,11,21,.,.,.:d0,d1,d2,h1,.,.\t0/0:40,31,41,.,.,.:D0,D1,D2,H1,.,.\n"
+    );
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--join-multiallelic",
+        "any",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+
+    for output_type in ["v", "z", "b", "u"] {
+        let ours = directory.path().join(format!("joined-ours.{output_type}"));
+        let oracle = directory
+            .path()
+            .join(format!("joined-oracle.{output_type}"));
+        run(
+            Command::new(PathBuf::from(env!("CARGO_BIN_EXE_rsomics-vcf"))).args([
+                "norm",
+                "--join-multiallelic",
+                "any",
+                "-O",
+                output_type,
+                "-o",
+                ours.to_str().unwrap(),
+                input.to_str().unwrap(),
+            ]),
+        );
+        run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "-m",
+            "+any",
+            "-O",
+            output_type,
+            "-o",
+            oracle.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ]));
+        let ours = body(run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-Ov",
+            ours.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-Ov",
+            oracle.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{output_type}");
+    }
+
+    for input_type in ["v", "z", "b", "u"] {
+        let encoded = directory.path().join(format!("joined-input.{input_type}"));
+        run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-O",
+            input_type,
+            "-o",
+            encoded.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ]));
+        let ours = body(run(Command::new(PathBuf::from(env!(
+            "CARGO_BIN_EXE_rsomics-vcf"
+        )))
+        .args([
+            "norm",
+            "--join-multiallelic",
+            "any",
+            encoded.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "-m",
+            "+any",
+            encoded.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{input_type}");
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn split_ad_sum_preservation_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
