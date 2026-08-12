@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use noodles_vcf::{
     Header,
@@ -38,12 +39,121 @@ pub(crate) struct Editor {
     transfers: Vec<BoundTransfer>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SampleSelection {
+    source_to_target: Vec<(usize, usize)>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum State<T> {
     Absent,
     Missing,
     Remove,
     Value(T),
+}
+
+impl SampleSelection {
+    pub(crate) fn bind(
+        source: &Header,
+        target: &Header,
+        list: Option<&str>,
+        file: Option<&Path>,
+    ) -> Result<Self> {
+        if list.is_some() && file.is_some() {
+            return Err(invalid(
+                "annotation samples and samples file are mutually exclusive",
+            ));
+        }
+        let (exclude, requested) = match (list, file) {
+            (Some(list), None) => parse_sample_list(list)?,
+            (None, Some(path)) => {
+                let raw = path.to_string_lossy();
+                let (exclude, path) = match raw.strip_prefix('^') {
+                    Some(path) => (true, Path::new(path)),
+                    None => (false, path),
+                };
+                let content = std::fs::read_to_string(path).map_err(|error| {
+                    invalid(format!(
+                        "reading annotation samples {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                let names = content
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if names.is_empty() {
+                    return Err(invalid("annotation samples file is empty"));
+                }
+                (exclude, names)
+            }
+            (None, None) => (false, Vec::new()),
+            (Some(_), Some(_)) => unreachable!(),
+        };
+        let requested = requested.into_iter().collect::<HashSet<_>>();
+        let mut pairs = Vec::new();
+        for (source_index, name) in source.sample_names().iter().enumerate() {
+            let selected = if list.is_none() && file.is_none() {
+                true
+            } else if exclude {
+                !requested.contains(name)
+            } else {
+                requested.contains(name)
+            };
+            if !selected {
+                continue;
+            }
+            if let Some(target_index) = target.sample_names().get_index_of(name) {
+                pairs.push((source_index, target_index));
+            } else if list.is_some() || file.is_some() {
+                return Err(invalid(format!(
+                    "annotation sample {name:?} is not present in the target"
+                )));
+            }
+        }
+        if list.is_some() || file.is_some() {
+            for name in &requested {
+                if !source.sample_names().contains(name) {
+                    return Err(invalid(format!(
+                        "annotation sample {name:?} is not present in the source"
+                    )));
+                }
+            }
+        }
+        if pairs.is_empty() {
+            return Err(invalid("annotation sample selection has no target samples"));
+        }
+        Ok(Self {
+            source_to_target: pairs,
+        })
+    }
+
+    pub(crate) fn pairs(&self) -> &[(usize, usize)] {
+        &self.source_to_target
+    }
+}
+
+fn parse_sample_list(raw: &str) -> Result<(bool, Vec<String>)> {
+    let (exclude, raw) = raw
+        .strip_prefix('^')
+        .map_or((false, raw), |raw| (true, raw));
+    let names = raw
+        .split(',')
+        .map(str::trim)
+        .map(|name| {
+            if name.is_empty() {
+                Err(invalid("annotation samples contain an empty name"))
+            } else {
+                Ok(name.to_owned())
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if names.is_empty() {
+        return Err(invalid("annotation samples must not be empty"));
+    }
+    Ok((exclude, names))
 }
 
 impl Editor {
@@ -969,6 +1079,15 @@ mod tests {
             .unwrap()
     }
 
+    fn sample_header(lines: &str, samples: &[&str]) -> vcf::Header {
+        format!(
+            "{BASE}{lines}#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}\n",
+            samples.join("\t")
+        )
+        .parse()
+        .unwrap()
+    }
+
     fn record(header: &vcf::Header, line: &str) -> RecordBuf {
         let raw = vcf::Record::try_from(line.as_bytes()).unwrap();
         RecordBuf::try_from_variant_record(header, &raw).unwrap()
@@ -1016,6 +1135,51 @@ mod tests {
             Number::Count(1)
         );
         assert!(!target.infos().contains_key("OLD"));
+    }
+
+    #[test]
+    fn selects_samples_by_name_in_source_order() {
+        let source = sample_header("", &["A", "B", "C"]);
+        let target = sample_header("", &["C", "B", "A"]);
+        assert_eq!(
+            SampleSelection::bind(&source, &target, None, None)
+                .unwrap()
+                .pairs(),
+            &[(0, 2), (1, 1), (2, 0)]
+        );
+        assert_eq!(
+            SampleSelection::bind(&source, &target, Some("A,C"), None)
+                .unwrap()
+                .pairs(),
+            &[(0, 2), (2, 0)]
+        );
+        assert_eq!(
+            SampleSelection::bind(&source, &target, Some("^B"), None)
+                .unwrap()
+                .pairs(),
+            &[(0, 2), (2, 0)]
+        );
+    }
+
+    #[test]
+    fn validates_sample_selection_and_files() {
+        let source = sample_header("", &["A", "B"]);
+        let target = sample_header("", &["B", "A"]);
+        assert!(SampleSelection::bind(&source, &target, Some("missing"), None).is_err());
+        assert!(
+            SampleSelection::bind(&source, &sample_header("", &["A"]), Some("B"), None).is_err()
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("samples.txt");
+        std::fs::write(&path, "B\n").unwrap();
+        assert_eq!(
+            SampleSelection::bind(&source, &target, None, Some(&path))
+                .unwrap()
+                .pairs(),
+            &[(1, 0)]
+        );
+        assert!(SampleSelection::bind(&source, &target, Some("A"), Some(&path)).is_err());
     }
 
     #[test]
