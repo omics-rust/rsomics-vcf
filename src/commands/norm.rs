@@ -123,9 +123,18 @@ pub(crate) struct Arguments {
     #[arg(value_name = "VARIANT", default_value = "-")]
     input: PathBuf,
 
-    /// Indexed FASTA reference for left alignment and REF validation
+    /// Indexed FASTA reference for alignment and REF validation
     #[arg(short = 'f', long = "fasta-ref", value_name = "FILE")]
     reference: Option<PathBuf>,
+
+    /// GFF3 annotation for HGVS 3-prime right alignment on forward transcripts
+    #[arg(
+        short = 'g',
+        long = "gff-annot",
+        value_name = "FILE",
+        requires = "reference"
+    )]
+    annotation: Option<PathBuf>,
 
     /// Split multiallelic records into biallelic records
     #[arg(short = 'm', long)]
@@ -265,6 +274,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
     };
     let options = Options {
         reference: arguments.reference,
+        annotation: arguments.annotation,
         expression,
         expression_logic,
         regions: read_regions(

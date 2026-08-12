@@ -7,6 +7,7 @@ use noodles_vcf::variant::{RecordBuf, record_buf::AlternateBases};
 use rsomics_common::{Result, RsomicsError};
 use rsomics_seqio::IndexedFasta;
 
+use super::gff::{Direction, TranscriptIndex};
 use fix::{
     clean_iupac, fix_reference, remove_reference_alternates, resolve_unknown_reference_bases,
     set_alleles,
@@ -32,14 +33,29 @@ pub(crate) enum MismatchPolicy {
 pub(crate) struct ReferenceNormalizer {
     reference: IndexedFasta,
     policy: MismatchPolicy,
+    transcripts: Option<TranscriptIndex>,
 }
 
 impl ReferenceNormalizer {
-    pub(crate) fn open(path: &Path, policy: MismatchPolicy) -> Result<Self> {
-        IndexedFasta::open(path).map(|reference| Self { reference, policy })
+    pub(crate) fn open(
+        path: &Path,
+        policy: MismatchPolicy,
+        annotation: Option<&Path>,
+    ) -> Result<Self> {
+        let reference = IndexedFasta::open(path)?;
+        let transcripts = annotation.map(TranscriptIndex::open).transpose()?;
+        Ok(Self {
+            reference,
+            policy,
+            transcripts,
+        })
     }
 
     pub(crate) fn normalize(&mut self, record: &mut RecordBuf) -> Result<Outcome> {
+        let direction = self
+            .transcripts
+            .as_ref()
+            .map_or(Direction::Left, |index| index.direction(record));
         let Some(position) = record.variant_start() else {
             return Ok(Outcome::Unsupported);
         };
@@ -121,48 +137,10 @@ impl ReferenceNormalizer {
             return self.mismatch(record, "ALT contains a non-ACGTN base");
         }
 
-        loop {
-            let last = alleles[0].last().copied().unwrap();
-            if alleles
-                .iter()
-                .skip(1)
-                .any(|allele| allele.last().copied() != Some(last))
-            {
-                break;
-            }
-            let minimum = alleles.iter().map(Vec::len).min().unwrap();
-            if minimum <= 1 && position == 0 {
-                break;
-            }
-            for allele in &mut alleles {
-                allele.pop();
-            }
-            if alleles.iter().any(Vec::is_empty) {
-                let previous = self.reference.fetch(
-                    record.reference_sequence_name().as_bytes(),
-                    position - 1..position,
-                )?[0];
-                let previous = iupac_first(previous).to_ascii_uppercase();
-                for allele in &mut alleles {
-                    allele.insert(0, previous);
-                }
-                position -= 1;
-            }
-        }
-
-        loop {
-            let minimum = alleles.iter().map(Vec::len).min().unwrap();
-            if minimum <= 1 {
-                break;
-            }
-            let first = alleles[0][0];
-            if alleles.iter().skip(1).any(|allele| allele[0] != first) {
-                break;
-            }
-            for allele in &mut alleles {
-                allele.remove(0);
-            }
-            position += 1;
+        if direction == Direction::Right {
+            self.right_align(record, &mut alleles, &mut position)?;
+        } else {
+            self.left_align(record, &mut alleles, &mut position)?;
         }
 
         let changed = fixed
@@ -190,6 +168,145 @@ impl ReferenceNormalizer {
                 .collect::<Vec<_>>(),
         );
         Ok(Outcome::Changed)
+    }
+
+    fn left_align(
+        &mut self,
+        record: &RecordBuf,
+        alleles: &mut [Vec<u8>],
+        position: &mut usize,
+    ) -> Result<()> {
+        loop {
+            let last = alleles[0].last().copied().unwrap();
+            if alleles
+                .iter()
+                .skip(1)
+                .any(|allele| allele.last().copied() != Some(last))
+            {
+                break;
+            }
+            let minimum = alleles.iter().map(Vec::len).min().unwrap();
+            if minimum <= 1 && *position == 0 {
+                break;
+            }
+            for allele in alleles.iter_mut() {
+                allele.pop();
+            }
+            if alleles.iter().any(Vec::is_empty) {
+                let previous = self.reference.fetch(
+                    record.reference_sequence_name().as_bytes(),
+                    *position - 1..*position,
+                )?[0];
+                let previous = iupac_first(previous).to_ascii_uppercase();
+                for allele in alleles.iter_mut() {
+                    allele.insert(0, previous);
+                }
+                *position -= 1;
+            }
+        }
+
+        loop {
+            let minimum = alleles.iter().map(Vec::len).min().unwrap();
+            if minimum <= 1 {
+                break;
+            }
+            let first = alleles[0][0];
+            if alleles.iter().skip(1).any(|allele| allele[0] != first) {
+                break;
+            }
+            for allele in alleles.iter_mut() {
+                allele.remove(0);
+            }
+            *position += 1;
+        }
+        Ok(())
+    }
+
+    fn right_align(
+        &mut self,
+        record: &RecordBuf,
+        alleles: &mut [Vec<u8>],
+        position: &mut usize,
+    ) -> Result<()> {
+        const WINDOW: usize = 100;
+
+        let original_position = *position;
+        let mut trim = 0;
+        let mut pad_right = alleles[0].len();
+        let mut has_indel = false;
+        loop {
+            let minimum = alleles
+                .iter()
+                .map(|allele| allele.len() - trim)
+                .min()
+                .unwrap();
+            has_indel |= alleles
+                .iter()
+                .skip(1)
+                .any(|allele| allele.len() != alleles[0].len());
+            let first = alleles[0][trim];
+            if alleles
+                .iter()
+                .skip(1)
+                .any(|allele| !allele[trim].eq_ignore_ascii_case(&first))
+            {
+                break;
+            }
+            trim += 1;
+            if minimum <= 1 {
+                let start = original_position
+                    .checked_add(pad_right)
+                    .ok_or_else(|| invalid(record, "right-alignment range overflows"))?;
+                let end = start
+                    .checked_add(WINDOW + 1)
+                    .ok_or_else(|| invalid(record, "right-alignment range overflows"))?;
+                let mut reference = self
+                    .reference
+                    .fetch(record.reference_sequence_name().as_bytes(), start..end)?
+                    .to_vec();
+                for base in &mut reference {
+                    *base = iupac_first(*base).to_ascii_uppercase();
+                }
+                if reference.is_empty() {
+                    return Err(invalid(record, "right alignment reached the reference end"));
+                }
+                for allele in alleles.iter_mut() {
+                    allele.extend_from_slice(&reference);
+                }
+                pad_right = pad_right
+                    .checked_add(WINDOW)
+                    .ok_or_else(|| invalid(record, "right-alignment range overflows"))?;
+            }
+        }
+
+        trim = trim.saturating_sub(usize::from(has_indel));
+        if trim > 0 {
+            for allele in alleles.iter_mut() {
+                allele.drain(..trim);
+            }
+            *position = position
+                .checked_add(trim)
+                .ok_or_else(|| invalid(record, "right-aligned position overflows"))?;
+        }
+
+        loop {
+            let minimum = alleles.iter().map(Vec::len).min().unwrap();
+            if minimum <= 1 {
+                break;
+            }
+            let last = alleles[0].last().copied().unwrap();
+            if alleles
+                .iter()
+                .skip(1)
+                .any(|allele| !allele.last().unwrap().eq_ignore_ascii_case(&last))
+            {
+                break;
+            }
+            for allele in alleles.iter_mut() {
+                allele.pop();
+            }
+        }
+        Ok(())
     }
 
     fn mismatch(&self, record: &RecordBuf, message: &str) -> Result<Outcome> {
@@ -266,7 +383,7 @@ mod tests {
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
             .parse()
             .unwrap();
-        let mut normalizer = ReferenceNormalizer::open(&path, MismatchPolicy::Exit).unwrap();
+        let mut normalizer = ReferenceNormalizer::open(&path, MismatchPolicy::Exit, None).unwrap();
 
         for (line, position, reference, alternate) in [
             (b"chr1\t4\t.\tA\tAA\t.\tPASS\t.".as_slice(), 1, "A", "AA"),
@@ -282,6 +399,39 @@ mod tests {
     }
 
     #[test]
+    fn right_aligns_forward_transcript_indels_by_the_hgvs_rule() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reference.fa");
+        let sequence = b"CTCTGGATCCCAGAAGGTGAGAAAGTTAAAATTCCCGTCGCTATCAAGGAATTAAGAGAAGCAACATCTCCGAAAGCCAACAAGGAAATCCTCGATGTGAGTTTCTGCTTTGCTGTGTGGGGGTCCATGGCTCTGAACCTCAGGCCCACCTTTTCTCATGTCTGGCAGCTGCTCTGCTCTAGACCCTGCTCATCTCCACAT";
+        assert_eq!(sequence.len(), 201);
+        let mut fasta = b">chr1\n".to_vec();
+        fasta.extend_from_slice(sequence);
+        fasta.push(b'\n');
+        fs::write(&path, fasta).unwrap();
+        fs::write(path.with_extension("fa.fai"), b"chr1\t201\t6\t201\t202\n").unwrap();
+        let gff = directory.path().join("annotation.gff3");
+        fs::write(
+            &gff,
+            b"chr1\t.\tgene\t1\t201\t.\t+\t.\tID=gene:g1;biotype=protein_coding\n\
+chr1\t.\tmRNA\t1\t201\t.\t+\t.\tID=transcript:t1;Parent=gene:g1;biotype=protein_coding\n",
+        )
+        .unwrap();
+        let header: vcf::Header = "##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=201>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            .parse()
+            .unwrap();
+        let mut normalizer =
+            ReferenceNormalizer::open(&path, MismatchPolicy::Exit, Some(&gff)).unwrap();
+        let mut record = record(&header, b"chr1\t48\t.\tGGAATTAAGA\tG\t.\tPASS\t.");
+
+        assert_eq!(normalizer.normalize(&mut record).unwrap(), Outcome::Changed);
+        assert_eq!(record.variant_start().map(usize::from), Some(51));
+        assert_eq!(record.reference_bases(), "ATTAAGAGAA");
+        assert_eq!(record.alternate_bases().as_ref(), ["A"]);
+    }
+
+    #[test]
     fn reference_mismatch_and_invalid_range_fail_with_record_context() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reference.fa");
@@ -292,7 +442,7 @@ mod tests {
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
             .parse()
             .unwrap();
-        let mut normalizer = ReferenceNormalizer::open(&path, MismatchPolicy::Exit).unwrap();
+        let mut normalizer = ReferenceNormalizer::open(&path, MismatchPolicy::Exit, None).unwrap();
 
         let mut mismatch = record(&header, b"chr1\t2\t.\tT\tA\t.\tPASS\t.");
         let error = normalizer.normalize(&mut mismatch).unwrap_err().to_string();
@@ -317,7 +467,7 @@ mod tests {
             .parse()
             .unwrap();
 
-        let mut exit = ReferenceNormalizer::open(&path, MismatchPolicy::Exit).unwrap();
+        let mut exit = ReferenceNormalizer::open(&path, MismatchPolicy::Exit, None).unwrap();
         let mut iupac_reference = record(&header, b"chr1\t2\t.\tA\tC\t.\tPASS\t.");
         assert_eq!(
             exit.normalize(&mut iupac_reference).unwrap(),
@@ -326,9 +476,9 @@ mod tests {
 
         let mut mismatch = record(&header, b"chr1\t3\t.\tA\tC\t.\tPASS\t.");
         assert!(exit.normalize(&mut mismatch).is_err());
-        let mut warn = ReferenceNormalizer::open(&path, MismatchPolicy::Warn).unwrap();
+        let mut warn = ReferenceNormalizer::open(&path, MismatchPolicy::Warn, None).unwrap();
         assert_eq!(warn.normalize(&mut mismatch).unwrap(), Outcome::Unsupported);
-        let mut skip = ReferenceNormalizer::open(&path, MismatchPolicy::Skip).unwrap();
+        let mut skip = ReferenceNormalizer::open(&path, MismatchPolicy::Skip, None).unwrap();
         assert_eq!(skip.normalize(&mut mismatch).unwrap(), Outcome::Skipped);
     }
 }

@@ -1,6 +1,7 @@
 mod atomize;
 mod cardinality;
 mod duplicate;
+mod gff;
 mod merge;
 mod reference;
 mod split;
@@ -35,6 +36,7 @@ pub(crate) enum SortOrder {
 #[derive(Clone, Debug)]
 pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
+    pub(crate) annotation: Option<PathBuf>,
     pub(crate) expression: Option<String>,
     pub(crate) expression_logic: Logic,
     pub(crate) regions: Option<RegionSet>,
@@ -284,7 +286,13 @@ impl<'a, W: VariantWriter> Normalizer<'a, W> {
         let reference_normalizer = options
             .reference
             .as_deref()
-            .map(|path| ReferenceNormalizer::open(path, options.mismatch_policy))
+            .map(|path| {
+                ReferenceNormalizer::open(
+                    path,
+                    options.mismatch_policy,
+                    options.annotation.as_deref(),
+                )
+            })
             .transpose()?;
         Ok(Self {
             header,
@@ -714,6 +722,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
         let (_directory, reference, input) = fixture();
         let options = Options {
             reference: Some(reference),
+            annotation: None,
             expression: None,
             expression_logic: Logic::Include,
             regions: None,
@@ -762,6 +771,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
         .unwrap();
         let options = Options {
             reference: Some(reference),
+            annotation: None,
             expression: None,
             expression_logic: Logic::Include,
             regions: None,

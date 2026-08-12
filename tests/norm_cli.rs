@@ -28,6 +28,30 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
     (reference, input)
 }
 
+fn right_alignment_fixture(directory: &Path) -> (PathBuf, PathBuf) {
+    let reference = directory.join("right.fa");
+    let input = directory.join("right.vcf");
+    let sequence = b"CTCTGGATCCCAGAAGGTGAGAAAGTTAAAATTCCCGTCGCTATCAAGGAATTAAGAGAAGCAACATCTCCGAAAGCCAACAAGGAAATCCTCGATGTGAGTTTCTGCTTTGCTGTGTGGGGGTCCATGGCTCTGAACCTCAGGCCCACCTTTTCTCATGTCTGGCAGCTGCTCTGCTCTAGACCCTGCTCATCTCCACAT";
+    let mut fasta = b">chr1\n".to_vec();
+    fasta.extend_from_slice(sequence);
+    fasta.push(b'\n');
+    fs::write(&reference, fasta).unwrap();
+    fs::write(
+        reference.with_extension("fa.fai"),
+        b"chr1\t201\t6\t201\t202\n",
+    )
+    .unwrap();
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=201>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t48\t.\tGGAATTAAGA\tG\t.\tPASS\t.\n",
+    )
+    .unwrap();
+    (reference, input)
+}
+
 #[test]
 fn public_command_normalizes_and_reports_json_separately() {
     let directory = tempfile::tempdir().unwrap();
@@ -58,6 +82,77 @@ fn public_command_normalizes_and_reports_json_separately() {
     let normalized = fs::read_to_string(output_path).unwrap();
     assert!(normalized.contains("chr1\t1\t.\tA\tAA"), "{normalized}");
     assert!(normalized.contains("chr1\t11\t.\tC\tG"), "{normalized}");
+}
+
+#[test]
+fn gff_annotation_right_aligns_only_unambiguous_forward_transcripts() {
+    let directory = tempfile::tempdir().unwrap();
+    let (reference, input) = right_alignment_fixture(directory.path());
+    let forward = directory.path().join("forward.gff3.gz");
+    let writer = File::create(&forward).unwrap();
+    let mut writer = flate2::write::GzEncoder::new(writer, flate2::Compression::default());
+    writer
+        .write_all(
+            b"chr1\t.\tgene\t1\t201\t.\t+\t.\tID=g1;biotype=protein_coding\n\
+chr1\t.\tmRNA\t1\t201\t.\t+\t.\tID=t1;Parent=g1;biotype=protein_coding\n",
+        )
+        .unwrap();
+    writer.finish().unwrap();
+
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--fasta-ref",
+            reference.to_str().unwrap(),
+            "--gff-annot",
+            forward.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(output.contains("chr1\t51\t.\tATTAAGAGAA\tA"), "{output}");
+
+    let conflict = directory.path().join("conflict.gff3");
+    fs::write(
+        &conflict,
+        b"chr1\t.\tgene\t1\t201\t.\t+\t.\tID=g1;biotype=protein_coding\n\
+chr1\t.\tmRNA\t1\t201\t.\t+\t.\tID=t1;Parent=g1;biotype=protein_coding\n\
+chr1\t.\tgene\t1\t201\t.\t-\t.\tID=g2;biotype=antisense\n\
+chr1\t.\ttranscript\t1\t201\t.\t-\t.\tID=t2;Parent=g2;biotype=antisense\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--fasta-ref",
+            reference.to_str().unwrap(),
+            "--gff-annot",
+            conflict.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(output.contains("chr1\t48\t.\tGGAATTAAGA\tG"), "{output}");
+
+    let rejected = Command::new(binary())
+        .args([
+            "norm",
+            "--gff-annot",
+            conflict.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
 }
 
 #[test]

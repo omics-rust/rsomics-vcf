@@ -73,6 +73,64 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn gff_directed_right_alignment_matches_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fa");
+    let input = directory.path().join("input.vcf");
+    let annotation = directory.path().join("annotation.gff3");
+    let sequence = b"CTCTGGATCCCAGAAGGTGAGAAAGTTAAAATTCCCGTCGCTATCAAGGAATTAAGAGAAGCAACATCTCCGAAAGCCAACAAGGAAATCCTCGATGTGAGTTTCTGCTTTGCTGTGTGGGGGTCCATGGCTCTGAACCTCAGGCCCACCTTTTCTCATGTCTGGCAGCTGCTCTGCTCTAGACCCTGCTCATCTCCACAT";
+    let mut fasta = b">chr1\n".to_vec();
+    fasta.extend_from_slice(sequence);
+    fasta.push(b'\n');
+    fs::write(&reference, fasta).unwrap();
+    fs::write(
+        reference.with_extension("fa.fai"),
+        b"chr1\t201\t6\t201\t202\n",
+    )
+    .unwrap();
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=201>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t48\t.\tGGAATTAAGA\tG\t.\tPASS\t.\n",
+    )
+    .unwrap();
+    fs::write(
+        &annotation,
+        b"chr1\t.\tgene\t1\t201\t.\t+\t.\tID=gene:g1;biotype=protein_coding\n\
+chr1\t.\tmRNA\t1\t201\t.\t+\t.\tID=transcript:t1;Parent=gene:g1;biotype=protein_coding\n",
+    )
+    .unwrap();
+
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--gff-annot",
+        annotation.to_str().unwrap(),
+        input.to_str().unwrap(),
+    ])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--gff-annot",
+        annotation.to_str().unwrap(),
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn typed_multiallelic_split_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
