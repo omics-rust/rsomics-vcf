@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+#[allow(dead_code)]
+mod annotate;
 pub mod head;
 pub mod index;
 pub mod query;
