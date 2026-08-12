@@ -52,6 +52,10 @@ pub(crate) struct Arguments {
     #[arg(short = 'a', long)]
     atomize: bool,
 
+    /// Preserve FORMAT/AD depth sums while splitting
+    #[arg(long, value_name = "TAG", requires = "split_multiallelic")]
+    keep_sum: Option<String>,
+
     /// REF mismatch behavior: exit, warn, or skip
     #[arg(long, value_name = "MODE", requires = "reference")]
     check_ref: Option<CheckReference>,
@@ -82,6 +86,11 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
                 .to_owned(),
         ));
     }
+    if arguments.keep_sum.as_deref().is_some_and(|tag| tag != "AD") {
+        return Err(RsomicsError::ConfigError(
+            "--keep-sum currently accepts only AD".to_owned(),
+        ));
+    }
     if json && arguments.output == Path::new("-") {
         return Err(RsomicsError::ConfigError(
             "--json requires --output because variant data otherwise uses standard output"
@@ -93,6 +102,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         split_multiallelic: arguments.split_multiallelic,
         mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
         atomize: arguments.atomize,
+        keep_sum_ad: arguments.keep_sum.is_some(),
         output_format: arguments.output_type.into(),
         site_window: arguments.site_window,
     };

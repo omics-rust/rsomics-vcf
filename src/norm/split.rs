@@ -12,18 +12,54 @@ use noodles_vcf::{
 };
 use rsomics_common::{Result, RsomicsError};
 
-pub(super) fn split(header: &Header, record: &RecordBuf) -> Result<Vec<RecordBuf>> {
+#[derive(Clone, Copy)]
+struct SampleProjection {
+    alternate_count: usize,
+    alternate: usize,
+    ploidy: Option<usize>,
+    sample: usize,
+    keep_sum_ad: bool,
+}
+
+pub(super) fn validate(header: &Header, keep_sum_ad: bool) -> Result<()> {
+    if !keep_sum_ad {
+        return Ok(());
+    }
+    let schema = header
+        .formats()
+        .get("AD")
+        .ok_or_else(|| invalid("--keep-sum AD requires FORMAT/AD in the header"))?;
+    if schema.number() != format::Number::ReferenceAlternateBases
+        || schema.ty() != format::Type::Integer
+    {
+        return Err(invalid(
+            "--keep-sum AD requires FORMAT/AD Number=R,Type=Integer",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn split(
+    header: &Header,
+    record: &RecordBuf,
+    keep_sum_ad: bool,
+) -> Result<Vec<RecordBuf>> {
     let alternates = record.alternate_bases().as_ref();
     if alternates.len() < 2 {
         return Ok(vec![record.clone()]);
     }
 
     (0..alternates.len())
-        .map(|alternate| split_one(header, record, alternate))
+        .map(|alternate| split_one(header, record, alternate, keep_sum_ad))
         .collect()
 }
 
-fn split_one(header: &Header, source: &RecordBuf, alternate: usize) -> Result<RecordBuf> {
+fn split_one(
+    header: &Header,
+    source: &RecordBuf,
+    alternate: usize,
+    keep_sum_ad: bool,
+) -> Result<RecordBuf> {
     let alternate_count = source.alternate_bases().as_ref().len();
     let mut record = source.clone();
     *record.alternate_bases_mut() =
@@ -68,11 +104,14 @@ fn split_one(header: &Header, source: &RecordBuf, alternate: usize) -> Result<Re
             *value = project_sample(
                 value.take(),
                 schema.number(),
-                alternate_count,
-                alternate,
-                ploidy,
                 key,
-                sample_index,
+                SampleProjection {
+                    alternate_count,
+                    alternate,
+                    ploidy,
+                    sample: sample_index,
+                    keep_sum_ad,
+                },
             )?;
         }
         samples.push(values);
@@ -119,18 +158,18 @@ fn project_info(
 fn project_sample(
     value: Option<SampleValue>,
     number: format::Number,
-    alternate_count: usize,
-    alternate: usize,
-    ploidy: Option<usize>,
     key: &str,
-    sample: usize,
+    projection: SampleProjection,
 ) -> Result<Option<SampleValue>> {
     let Some(value) = value else {
         return Ok(None);
     };
+    if projection.keep_sum_ad && key == "AD" {
+        return project_ad_sum(value, projection).map(Some);
+    }
     let indexes = match number {
-        format::Number::AlternateBases => Some(vec![alternate]),
-        format::Number::ReferenceAlternateBases => Some(vec![0, alternate + 1]),
+        format::Number::AlternateBases => Some(vec![projection.alternate]),
+        format::Number::ReferenceAlternateBases => Some(vec![0, projection.alternate + 1]),
         format::Number::Samples => None,
         format::Number::Count(_)
         | format::Number::LocalAlternateBases
@@ -140,23 +179,62 @@ fn project_sample(
         | format::Number::BaseModifications
         | format::Number::Unknown => return Ok(Some(value)),
     };
-    let context = format!("FORMAT/{key} sample {}", sample + 1);
+    let context = format!("FORMAT/{key} sample {}", projection.sample + 1);
     match (value, indexes) {
         (SampleValue::Array(array), Some(indexes)) => project_sample_array(
             array,
             &indexes,
-            expected_format(number, alternate_count)?,
+            expected_format(number, projection.alternate_count)?,
             &context,
         )
         .map(SampleValue::Array)
         .map(Some),
-        (SampleValue::Array(array), None) => {
-            project_sample_genotypes(array, alternate_count, alternate, ploidy, &context)
-                .map(SampleValue::Array)
-                .map(Some)
-        }
+        (SampleValue::Array(array), None) => project_sample_genotypes(
+            array,
+            projection.alternate_count,
+            projection.alternate,
+            projection.ploidy,
+            &context,
+        )
+        .map(SampleValue::Array)
+        .map(Some),
         _ => Err(invalid(format!("{context} is not encoded as an array"))),
     }
+}
+
+fn project_ad_sum(value: SampleValue, projection: SampleProjection) -> Result<SampleValue> {
+    let SampleValue::Array(SampleArray::Integer(values)) = value else {
+        return Err(invalid(format!(
+            "FORMAT/AD sample {} is not encoded as an integer array",
+            projection.sample + 1
+        )));
+    };
+    let expected = projection.alternate_count + 1;
+    if values.len() != expected {
+        return Err(invalid(format!(
+            "FORMAT/AD sample {} has {} values, expected {expected}",
+            projection.sample + 1,
+            values.len()
+        )));
+    }
+    let selected = projection.alternate + 1;
+    let reference = values
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != selected)
+        .filter_map(|(_, value)| *value)
+        .try_fold(0i32, |sum, value| {
+            sum.checked_add(value).ok_or_else(|| {
+                invalid(format!(
+                    "FORMAT/AD sample {} sum exceeds int32",
+                    projection.sample + 1
+                ))
+            })
+        })?;
+    Ok(SampleValue::Array(SampleArray::Integer(vec![
+        Some(reference),
+        values[selected],
+    ])))
 }
 
 fn remap_genotype(
@@ -428,7 +506,7 @@ mod tests {
         .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
 
-        let records = split(&header, &record).unwrap();
+        let records = split(&header, &record, false).unwrap();
         let mut writer = vcf::io::Writer::new(Vec::new());
         for record in &records {
             writer.write_variant_record(&header, record).unwrap();
@@ -450,10 +528,33 @@ chr1\t10\t.\tA\tG\t.\tPASS\tIA=20;IR=5,2;IG=0,30,50\tGT:FA:FR:FG\t0/1:22:7,3:0,3
             .unwrap();
         let raw = vcf::Record::try_from(b"chr1\t10\t.\tA\tC,G\t.\tPASS\tIA=10".as_slice()).unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
-        let error = split(&header, &record).unwrap_err().to_string();
+        let error = split(&header, &record, false).unwrap_err().to_string();
         assert!(
             error.contains("INFO/IA has 1 values, expected 2"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn preserves_ad_sums_when_requested() {
+        let header: vcf::Header = "##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"AD\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"
+            .parse()
+            .unwrap();
+        let raw =
+            vcf::Record::try_from(b"chr1\t10\t.\tA\tC,G\t.\tPASS\t.\tGT:AD\t1/2:10,3,2".as_slice())
+                .unwrap();
+        let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
+        let records = split(&header, &record, true).unwrap();
+        let mut writer = vcf::io::Writer::new(Vec::new());
+        for record in &records {
+            writer.write_variant_record(&header, record).unwrap();
+        }
+        let output = String::from_utf8(writer.into_inner()).unwrap();
+        assert!(output.contains("GT:AD\t1/0:12,3"), "{output}");
+        assert!(output.contains("GT:AD\t0/1:13,2"), "{output}");
     }
 }

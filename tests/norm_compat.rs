@@ -107,6 +107,47 @@ chr1\t10\t.\tA\tC,G\t.\tPASS\tIA=10,20;IR=5,3,2;IG=0,10,20,30,40,50\tGT:FA:FR:FG
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn split_ad_sum_preservation_matches_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"AD\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t10\t.\tA\tC,G\t.\tPASS\t.\tGT:AD\t1/2:10,3,2\t0/2:10,.,2\n",
+    )
+    .unwrap();
+
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--split-multiallelic",
+        "--keep-sum",
+        "AD",
+        input.to_str().unwrap(),
+    ])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "-m",
+        "-any",
+        "--keep-sum",
+        "AD",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn split_and_reference_realign_compose_like_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));

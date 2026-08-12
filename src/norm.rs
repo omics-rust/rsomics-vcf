@@ -21,6 +21,7 @@ pub(crate) struct Options {
     pub(crate) split_multiallelic: bool,
     pub(crate) mismatch_policy: MismatchPolicy,
     pub(crate) atomize: bool,
+    pub(crate) keep_sum_ad: bool,
     pub(crate) output_format: OutputFormat,
     pub(crate) site_window: usize,
 }
@@ -105,6 +106,7 @@ fn normalize_stream(
         .as_deref()
         .map(|path| ReferenceNormalizer::open(path, options.mismatch_policy))
         .transpose()?;
+    split::validate(header, options.keep_sum_ad)?;
     let mut scratch = RecordScratch::default();
     let mut pending = BinaryHeap::new();
     let mut seen = HashSet::new();
@@ -140,7 +142,7 @@ fn normalize_stream(
         validate_input_order(number, reference, position, &mut input_position, &mut seen)?;
 
         let records = if options.split_multiallelic {
-            split::split(header, &record)?
+            split::split(header, &record, options.keep_sum_ad)?
         } else {
             vec![record]
         };
@@ -323,6 +325,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             split_multiallelic: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
+            keep_sum_ad: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
         };
@@ -359,6 +362,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             split_multiallelic: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
+            keep_sum_ad: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
         };

@@ -122,6 +122,40 @@ chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.25,0.5\tGT\t1/2\n",
 }
 
 #[test]
+fn public_command_preserves_ad_sums_while_splitting() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"AD\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t10\t.\tA\tC,G\t.\tPASS\t.\tGT:AD\t1/2:10,3,2\t0/2:10,.,2\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--split-multiallelic",
+            "--keep-sum",
+            "AD",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(output.contains("GT:AD\t1/0:12,3\t0/0:12,."), "{output}");
+    assert!(output.contains("GT:AD\t0/1:13,2\t0/1:10,2"), "{output}");
+}
+
+#[test]
 fn reference_mismatch_warn_and_skip_are_observable() {
     let directory = tempfile::tempdir().unwrap();
     let reference = directory.path().join("reference.fa");

@@ -152,6 +152,7 @@ mod tests {
         assert!(help.contains("-f, --fasta-ref <FILE>"), "{help}");
         assert!(help.contains("-m, --split-multiallelic"), "{help}");
         assert!(help.contains("-a, --atomize"), "{help}");
+        assert!(help.contains("--keep-sum <TAG>"), "{help}");
         assert!(help.contains("--check-ref <MODE>"), "{help}");
         assert!(help.contains("-w, --site-window <INT>"), "{help}");
         assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
