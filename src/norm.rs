@@ -25,6 +25,12 @@ pub(crate) use merge::Policy as JoinPolicy;
 pub(crate) use reference::MismatchPolicy;
 use reference::{Outcome, ReferenceNormalizer};
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum SortOrder {
+    Position,
+    Lexicographic,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
@@ -32,6 +38,7 @@ pub(crate) struct Options {
     pub(crate) expression_logic: Logic,
     pub(crate) regions: Option<RegionSet>,
     pub(crate) targets: Option<RegionSelection>,
+    pub(crate) sort: SortOrder,
     pub(crate) split_multiallelic: bool,
     pub(crate) join_multiallelic: Option<JoinPolicy>,
     pub(crate) strict_filter: bool,
@@ -69,6 +76,7 @@ struct Pending {
     serial: u64,
     input: u64,
     selected: bool,
+    sort: SortOrder,
     record: RecordBuf,
 }
 
@@ -101,7 +109,7 @@ struct Normalizer<'a, W> {
 
 impl PartialEq for Pending {
     fn eq(&self, other: &Self) -> bool {
-        self.key() == other.key()
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -115,13 +123,48 @@ impl PartialOrd for Pending {
 
 impl Ord for Pending {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.key().cmp(&other.key())
+        self.coordinate()
+            .cmp(&other.coordinate())
+            .then_with(|| self.sort.cmp(&other.sort))
+            .then_with(|| {
+                if self.sort == SortOrder::Lexicographic {
+                    compare_alleles(&self.record, &other.record)
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .then_with(|| self.serial.cmp(&other.serial))
     }
 }
 
+fn compare_alleles(left: &RecordBuf, right: &RecordBuf) -> Ordering {
+    compare_ascii_case_insensitive(
+        left.reference_bases().as_bytes(),
+        right.reference_bases().as_bytes(),
+    )
+    .then_with(|| {
+        let left = left.alternate_bases();
+        let right = right.alternate_bases();
+        left.as_ref()
+            .iter()
+            .zip(right.as_ref())
+            .find_map(|(left, right)| {
+                let order = compare_ascii_case_insensitive(left.as_bytes(), right.as_bytes());
+                (order != Ordering::Equal).then_some(order)
+            })
+            .unwrap_or_else(|| left.as_ref().len().cmp(&right.as_ref().len()))
+    })
+}
+
+fn compare_ascii_case_insensitive(left: &[u8], right: &[u8]) -> Ordering {
+    left.iter()
+        .map(u8::to_ascii_lowercase)
+        .cmp(right.iter().map(u8::to_ascii_lowercase))
+}
+
 impl Pending {
-    fn key(&self) -> (usize, usize, u64) {
-        (self.reference, self.position, self.serial)
+    fn coordinate(&self) -> (usize, usize) {
+        (self.reference, self.position)
     }
 }
 
@@ -370,6 +413,7 @@ impl<'a, W: VariantWriter> Normalizer<'a, W> {
                     serial: self.serial,
                     input: number,
                     selected,
+                    sort: self.options.sort,
                     record,
                 }));
                 self.serial = self.serial.checked_add(1).ok_or_else(|| {
@@ -650,6 +694,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             expression_logic: Logic::Include,
             regions: None,
             targets: None,
+            sort: SortOrder::Position,
             split_multiallelic: false,
             join_multiallelic: None,
             strict_filter: false,
@@ -697,6 +742,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             expression_logic: Logic::Include,
             regions: None,
             targets: None,
+            sort: SortOrder::Position,
             split_multiallelic: false,
             join_multiallelic: None,
             strict_filter: false,

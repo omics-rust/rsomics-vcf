@@ -46,6 +46,12 @@ enum JoinMultiallelic {
     Any,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SortMethod {
+    Pos,
+    Lex,
+}
+
 impl From<JoinMultiallelic> for norm::JoinPolicy {
     fn from(value: JoinMultiallelic) -> Self {
         match value {
@@ -53,6 +59,15 @@ impl From<JoinMultiallelic> for norm::JoinPolicy {
             JoinMultiallelic::Indels => Self::Indels,
             JoinMultiallelic::Both => Self::Both,
             JoinMultiallelic::Any => Self::Any,
+        }
+    }
+}
+
+impl From<SortMethod> for norm::SortOrder {
+    fn from(value: SortMethod) -> Self {
+        match value {
+            SortMethod::Pos => Self::Position,
+            SortMethod::Lex => Self::Lexicographic,
         }
     }
 }
@@ -194,6 +209,10 @@ pub(crate) struct Arguments {
     #[arg(long, value_name = "MODE", default_value = "pos")]
     targets_overlap: Overlap,
 
+    /// Local output order: pos or lex
+    #[arg(short = 'S', long, value_name = "METHOD", default_value = "pos")]
+    sort: SortMethod,
+
     /// Write normalized variants to this file instead of standard output
     #[arg(
         short = 'o',
@@ -254,6 +273,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
             arguments.targets_file.as_deref(),
             arguments.targets_overlap.into(),
         )?,
+        sort: arguments.sort.into(),
         split_multiallelic: arguments.split_multiallelic,
         join_multiallelic: arguments.join_multiallelic.map(Into::into),
         strict_filter: arguments.strict_filter,

@@ -269,6 +269,51 @@ fn indexed_region_modes_match_bcftools_1_24() {
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn local_sort_modes_match_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\tg\tA\tG\t.\tPASS\t.\n\
+chr1\t10\taa\tAA\tA\t.\tPASS\t.\n\
+chr1\t10\tc\tA\tC\t.\tPASS\t.\n\
+chr1\t10\tt\ta\tt\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    for method in ["pos", "lex"] {
+        let ours = body(run(Command::new(PathBuf::from(env!(
+            "CARGO_BIN_EXE_rsomics-vcf"
+        )))
+        .args([
+            "norm",
+            "--remove-duplicates",
+            "exact",
+            "--sort",
+            method,
+            input.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "--rm-dup",
+            "exact",
+            "--sort",
+            method,
+            input.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{method}");
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn typed_biallelic_join_any_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));

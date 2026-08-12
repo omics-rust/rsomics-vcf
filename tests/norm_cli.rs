@@ -322,6 +322,52 @@ chr1\t30\tc\tA\tC,G\t.\tPASS\t.\n",
 }
 
 #[test]
+fn local_sort_modes_are_stable_or_allele_lexicographic() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\tg\tA\tG\t.\tPASS\t.\n\
+chr1\t10\taa\tAA\tA\t.\tPASS\t.\n\
+chr1\t10\tc\tA\tC\t.\tPASS\t.\n\
+chr1\t10\tt\ta\tt\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    for (method, expected) in [
+        ("pos", ["g", "aa", "c", "t"]),
+        ("lex", ["c", "g", "t", "aa"]),
+    ] {
+        let output = Command::new(binary())
+            .args([
+                "norm",
+                "--remove-duplicates",
+                "exact",
+                "--sort",
+                method,
+                input.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{method}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let ids = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| line.split('\t').nth(2).unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected, "{method}");
+    }
+}
+
+#[test]
 fn invalid_norm_expression_fails_before_writing_output() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.vcf");
