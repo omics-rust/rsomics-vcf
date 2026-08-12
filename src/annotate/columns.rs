@@ -188,6 +188,26 @@ impl BoundColumns {
             SourceKind::Tabular | SourceKind::Variant => {}
         }
         if source_kind == SourceKind::Tabular {
+            let reference = spec
+                .fields
+                .iter()
+                .any(|field| matches!(field, Column::Match(MatchField::Ref)));
+            let alternate = spec
+                .fields
+                .iter()
+                .any(|field| matches!(field, Column::Match(MatchField::Alt)));
+            if reference != alternate {
+                return Err(invalid(
+                    "tabular allele matching requires both REF and ALT columns",
+                ));
+            }
+            if reference && spec.match_layout == Some(MatchLayout::Interval) {
+                return Err(invalid(
+                    "tabular REF and ALT matching requires CHROM and POS rather than FROM and TO",
+                ));
+            }
+        }
+        if source_kind == SourceKind::Tabular {
             for (index, field) in spec.fields.iter_mut().enumerate() {
                 if let Column::Transfer(transfer) = field {
                     transfer.source = SourceField::Tabular(index);
@@ -615,5 +635,21 @@ mod tests {
 
         assert_eq!(bound.spec().transfers()[0].source, SourceField::Tabular(3));
         assert_eq!(bound.spec().transfers()[1].source, SourceField::Tabular(4));
+    }
+
+    #[test]
+    fn rejects_incomplete_or_interval_tabular_allele_keys() {
+        let header = vcf::Header::default();
+        for raw in [
+            "CHROM,POS,REF,INFO/X",
+            "CHROM,POS,ALT,INFO/X",
+            "CHROM,FROM,TO,REF,ALT,INFO/X",
+        ] {
+            let spec = ColumnSpec::parse(raw).unwrap();
+            assert!(
+                BoundColumns::bind(spec, SourceKind::Tabular, &header, None).is_err(),
+                "{raw}"
+            );
+        }
     }
 }

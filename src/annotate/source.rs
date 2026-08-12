@@ -54,8 +54,9 @@ pub(crate) struct AnnotationSource {
     reader: SourceReader,
     pub(crate) next: Option<AnnotationRecord>,
     pub(crate) active: VecDeque<AnnotationRecord>,
-    contigs: HashMap<String, usize>,
+    pub(super) contigs: HashMap<String, usize>,
     last_coordinate: Option<(usize, usize, u64)>,
+    pub(super) last_target_coordinate: Option<(usize, usize)>,
 }
 
 impl std::fmt::Debug for AnnotationSource {
@@ -115,6 +116,7 @@ impl AnnotationSource {
             active: VecDeque::new(),
             contigs,
             last_coordinate: None,
+            last_target_coordinate: None,
         };
         source.next = source.read_next()?;
         Ok(source)
@@ -137,9 +139,12 @@ impl AnnotationSource {
     }
 
     fn read_next(&mut self) -> Result<Option<AnnotationRecord>> {
-        let serial = self
-            .last_coordinate
-            .map_or(1, |(_, _, serial)| serial.saturating_add(1));
+        let serial = match self.last_coordinate {
+            Some((_, _, serial)) => serial
+                .checked_add(1)
+                .ok_or_else(|| invalid("annotation record count exceeds u64"))?,
+            None => 1,
+        };
         let record = match &mut self.reader {
             SourceReader::Variant {
                 reader,
@@ -314,11 +319,7 @@ fn parse_tabular_line(
     }
 
     let start = start.expect("validated coordinate layout has a start");
-    let end = if columns.spec().match_layout() == Some(MatchLayout::Position) {
-        info_end.unwrap_or_else(|| end.expect("validated coordinate layout has an end"))
-    } else {
-        end.expect("validated coordinate layout has an end")
-    };
+    let end = end.expect("validated coordinate layout has an end");
     if !bed && (start == 0 || end == 0) {
         return Err(invalid(format!(
             "annotation line {line_number} uses zero in one-based coordinates"
@@ -356,7 +357,7 @@ fn parse_tabular_line(
     })
 }
 
-fn variant_record(record: RecordBuf, serial: u64) -> Result<AnnotationRecord> {
+pub(super) fn variant_record(record: RecordBuf, serial: u64) -> Result<AnnotationRecord> {
     let start = record.variant_start().map_or(0, usize::from);
     let info_end = match record.info().get(key::END_POSITION) {
         None => None,
@@ -371,11 +372,12 @@ fn variant_record(record: RecordBuf, serial: u64) -> Result<AnnotationRecord> {
             )));
         }
     };
-    let end = info_end.unwrap_or_else(|| {
-        start
-            .saturating_add(record.reference_bases().len().max(1))
-            .saturating_sub(1)
-    });
+    let end = match info_end {
+        Some(end) => end,
+        None => start
+            .checked_add(record.reference_bases().len().max(1) - 1)
+            .ok_or_else(|| invalid(format!("annotation record {serial} span exceeds usize")))?,
+    };
     if end < start {
         return Err(invalid(format!(
             "annotation record {serial} end {end} precedes start {start}"
@@ -551,7 +553,7 @@ mod tests {
         );
 
         let record = read_one(&path, "CHROM,POS,REF,ALT,~ID,~INFO/END,INFO/NOTE");
-        assert_eq!((record.contig, record.start, record.end), (1, 7, 12));
+        assert_eq!((record.contig, record.start, record.end), (1, 7, 7));
         assert_eq!(record.reference.as_deref(), Some("A"));
         assert_eq!(record.alternates, ["C", "G"]);
         assert_eq!(record.id.as_deref(), Some("rs7"));
