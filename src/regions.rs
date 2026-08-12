@@ -132,11 +132,7 @@ impl RegionSet {
     pub fn parse(values: impl IntoIterator<Item = String>, overlap: OverlapMode) -> Result<Self> {
         let regions = values
             .into_iter()
-            .map(|value| {
-                value.parse().map_err(|error| {
-                    RsomicsError::InvalidInput(format!("invalid region {value:?}: {error}"))
-                })
-            })
+            .map(|value| parse_region(&value))
             .collect::<Result<Vec<_>>>()?;
         Self::new(regions, overlap)
     }
@@ -192,6 +188,36 @@ impl RegionSet {
     pub(crate) fn overlap(&self) -> OverlapMode {
         self.overlap
     }
+}
+
+fn parse_region(value: &str) -> Result<Region> {
+    let interval = value.rsplit_once(':').map(|(_, interval)| interval);
+    let open_end = interval
+        .and_then(|interval| interval.strip_suffix('-'))
+        .is_some_and(is_coordinate);
+    let normalized = if open_end {
+        value.strip_suffix('-').unwrap()
+    } else {
+        value
+    };
+    let region: Region = normalized.parse().map_err(|error| {
+        RsomicsError::InvalidInput(format!("invalid region {value:?}: {error}"))
+    })?;
+    if interval.is_some_and(is_coordinate) {
+        let start = region.interval().start().ok_or_else(|| {
+            RsomicsError::InvalidInput(format!("invalid region {value:?}: missing position"))
+        })?;
+        Ok(Region::new(region.name().to_owned(), start..=start))
+    } else {
+        Ok(region)
+    }
+}
+
+fn is_coordinate(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b',')
 }
 
 pub(crate) fn overlaps(record: &RecordBuf, interval: Interval, mode: OverlapMode) -> bool {
@@ -300,5 +326,15 @@ mod tests {
 
         assert!(RegionSelection::new(regions.clone(), false).keeps(&record));
         assert!(!RegionSelection::new(regions, true).keeps(&record));
+    }
+
+    #[test]
+    fn single_coordinate_regions_are_not_open_ended() {
+        let exact = RegionSet::parse(["chr1:10".to_owned()], OverlapMode::Position).unwrap();
+        let open = RegionSet::parse(["chr1:10-".to_owned()], OverlapMode::Position).unwrap();
+        let later = record(b"chr1\t12\t.\tA\tC\t10\tPASS\t.");
+
+        assert!(!exact.matches(&later));
+        assert!(open.matches(&later));
     }
 }
