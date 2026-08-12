@@ -1,8 +1,11 @@
 #![cfg(feature = "norm-preview")]
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use noodles_bgzf as bgzf;
 
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rsomics-vcf"))
@@ -210,6 +213,112 @@ chr1\t20\tb\tA\tC,G\t.\tPASS\t.\n",
             .collect::<Vec<_>>();
         assert_eq!(ids, [expected_id, expected_id]);
     }
+}
+
+#[test]
+fn indexed_regions_bound_norm_input_and_compose_with_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf.gz");
+    let mut writer = bgzf::io::Writer::new(File::create(&input).unwrap());
+    writer
+        .write_all(
+            b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tAT\tA,G\t.\tPASS\t.\n\
+chr1\t20\tb\tA\tC,G\t.\tPASS\t.\n\
+chr1\t30\tc\tA\tC,G\t.\tPASS\t.\n",
+        )
+        .unwrap();
+    writer.try_finish().unwrap();
+    let indexed = Command::new(binary())
+        .args(["index", input.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    let bcf = directory.path().join("input.bcf");
+    let converted = Command::new(binary())
+        .args([
+            "view",
+            "--output-type",
+            "b",
+            "--output",
+            bcf.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        converted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&converted.stderr)
+    );
+    let indexed = Command::new(binary())
+        .args(["index", bcf.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    for (format, input) in [("vcf", input), ("bcf", bcf)] {
+        let output_path = directory.path().join(format!("output.{format}.vcf"));
+        let output = Command::new(binary())
+            .args([
+                "--json",
+                "norm",
+                "--split-multiallelic",
+                "--regions",
+                "chr1:11,chr1:10-11,chr1:20",
+                "--regions-overlap",
+                "record",
+                "--targets",
+                "^chr1:20",
+                "--output",
+                output_path.to_str().unwrap(),
+                input.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{format}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(summary["result"]["summary"]["read"], 2, "{format}");
+        assert_eq!(
+            summary["result"]["summary"]["target_filtered"], 1,
+            "{format}"
+        );
+        let output = fs::read_to_string(output_path).unwrap();
+        let records = output
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2, "{format}: {output}");
+        assert!(records.iter().all(|record| record.contains("\ta\t")));
+    }
+
+    let stdin = Command::new(binary())
+        .args([
+            "norm",
+            "--remove-duplicates",
+            "exact",
+            "--regions",
+            "chr1:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!stdin.status.success());
+    assert!(stdin.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&stdin.stderr).contains("require a named input"));
 }
 
 #[test]

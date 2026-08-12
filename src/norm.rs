@@ -19,7 +19,7 @@ use crate::filter::Logic;
 use crate::format::{
     HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer, trim_line_ending,
 };
-use crate::regions::RegionSelection;
+use crate::regions::{IndexedRecords, RegionSelection, RegionSet};
 pub(crate) use duplicate::Policy as DuplicatePolicy;
 pub(crate) use merge::Policy as JoinPolicy;
 pub(crate) use reference::MismatchPolicy;
@@ -30,6 +30,7 @@ pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
     pub(crate) expression: Option<String>,
     pub(crate) expression_logic: Logic,
+    pub(crate) regions: Option<RegionSet>,
     pub(crate) targets: Option<RegionSelection>,
     pub(crate) split_multiallelic: bool,
     pub(crate) join_multiallelic: Option<JoinPolicy>,
@@ -82,6 +83,22 @@ struct OutputOptions<'a> {
     strict_filter: bool,
 }
 
+struct Normalizer<'a, W> {
+    header: &'a Header,
+    options: &'a Options,
+    expression: Option<&'a Compiled>,
+    writer: &'a mut W,
+    reference_order: HashMap<&'a str, usize>,
+    reference_normalizer: Option<ReferenceNormalizer>,
+    pending: BinaryHeap<Reverse<Pending>>,
+    seen: HashSet<usize>,
+    input_position: Option<(usize, usize)>,
+    output_state: OutputState,
+    output_options: OutputOptions<'a>,
+    serial: u64,
+    summary: Summary,
+}
+
 impl PartialEq for Pending {
     fn eq(&self, other: &Self) -> bool {
         self.key() == other.key()
@@ -114,91 +131,145 @@ pub(crate) fn write(input: &Path, options: &Options, output: impl Write) -> Resu
             "--site-window must be at least 1".to_owned(),
         ));
     }
-
-    let mut reader = Reader::open(input)?;
-    let (mut header, _, _) = reader.read_header()?;
-    if let Some(tag) = options.old_record_tag.as_deref() {
-        atomize::prepare_header(&mut header, tag)?;
-    }
-    let expression = options
-        .expression
-        .as_deref()
-        .map(|source| {
-            Compiled::bind(source, &header).map_err(|error| {
-                RsomicsError::ConfigError(format!("invalid norm expression: {error}"))
-            })
-        })
-        .transpose()?;
     let mut writer = Writer::new(output, options.output_format);
-    writer.write_header(&header, HeaderMode::Full)?;
-    let summary = normalize_stream(
-        &mut reader,
-        &header,
-        options,
-        expression.as_ref(),
-        &mut writer,
-    )?;
+    let summary = if let Some(regions) = &options.regions {
+        if input == Path::new("-") {
+            return Err(RsomicsError::ConfigError(
+                "indexed regions require a named input".to_owned(),
+            ));
+        }
+        normalize_indexed(input, regions, options, &mut writer)?
+    } else {
+        normalize_stream(input, options, &mut writer)?
+    };
     writer.finish()?;
     Ok(summary)
 }
 
 fn normalize_stream(
-    reader: &mut Reader,
-    header: &Header,
+    input: &Path,
     options: &Options,
-    expression: Option<&Compiled>,
     writer: &mut impl VariantWriter,
 ) -> Result<Summary> {
-    let reference_order: HashMap<_, _> = header
-        .contigs()
-        .keys()
-        .enumerate()
-        .map(|(index, name)| (name.as_str(), index))
-        .collect();
-    let mut normalizer = options
-        .reference
-        .as_deref()
-        .map(|path| ReferenceNormalizer::open(path, options.mismatch_policy))
-        .transpose()?;
-    split::validate(header, options.keep_sum_ad)?;
+    let mut reader = Reader::open(input)?;
+    let (mut header, _, _) = reader.read_header()?;
+    prepare_header(&mut header, options)?;
+    let expression = bind_expression(&header, options)?;
+    let mut normalizer = Normalizer::new(&header, options, expression.as_ref(), writer)?;
+    normalizer.write_header()?;
     let mut scratch = RecordScratch::default();
-    let mut pending = BinaryHeap::new();
-    let mut seen = HashSet::new();
-    let mut input_position = None;
-    let mut output_state = OutputState {
-        position: None,
-        duplicates: duplicate::State::new(options.duplicate_policy),
-    };
-    let output_options = OutputOptions {
-        old_record_tag: options.old_record_tag.as_deref(),
-        join_multiallelic: options.join_multiallelic,
-        strict_filter: options.strict_filter,
-    };
-    let mut serial = 0;
-    let mut summary = Summary {
-        read: 0,
-        written: 0,
-        changed: 0,
-        unchanged: 0,
-        unsupported: 0,
-        split: 0,
-        joined: 0,
-        not_selected: 0,
-        target_filtered: 0,
-        skipped: 0,
-        atomized: 0,
-        duplicates: 0,
-        output_format: options.output_format,
-    };
-
     loop {
-        let number = summary.read + 1;
-        let Some(record) = reader.read_record(header, &mut scratch, number)? else {
+        let number = normalizer.summary.read + 1;
+        let Some(record) = reader.read_record(&header, &mut scratch, number)? else {
             break;
         };
-        summary.read += 1;
+        normalizer.push(record, number)?;
+    }
+    normalizer.finish()?;
+    Ok(normalizer.summary)
+}
 
-        let reference = reference_order
+fn normalize_indexed(
+    input: &Path,
+    regions: &RegionSet,
+    options: &Options,
+    writer: &mut impl VariantWriter,
+) -> Result<Summary> {
+    let mut reader = IndexedRecords::open(input, regions)?;
+    let mut header = reader.header().clone();
+    prepare_header(&mut header, options)?;
+    let expression = bind_expression(&header, options)?;
+    let mut normalizer = Normalizer::new(&header, options, expression.as_ref(), writer)?;
+    normalizer.write_header()?;
+    let read = reader.visit(|_, record, number| normalizer.push(record, number))?;
+    normalizer.summary.read = read;
+    normalizer.finish()?;
+    Ok(normalizer.summary)
+}
+
+fn prepare_header(header: &mut Header, options: &Options) -> Result<()> {
+    if let Some(tag) = options.old_record_tag.as_deref() {
+        atomize::prepare_header(header, tag)?;
+    }
+    Ok(())
+}
+
+fn bind_expression(header: &Header, options: &Options) -> Result<Option<Compiled>> {
+    options
+        .expression
+        .as_deref()
+        .map(|source| {
+            Compiled::bind(source, header).map_err(|error| {
+                RsomicsError::ConfigError(format!("invalid norm expression: {error}"))
+            })
+        })
+        .transpose()
+}
+
+impl<'a, W: VariantWriter> Normalizer<'a, W> {
+    fn new(
+        header: &'a Header,
+        options: &'a Options,
+        expression: Option<&'a Compiled>,
+        writer: &'a mut W,
+    ) -> Result<Self> {
+        split::validate(header, options.keep_sum_ad)?;
+        let reference_normalizer = options
+            .reference
+            .as_deref()
+            .map(|path| ReferenceNormalizer::open(path, options.mismatch_policy))
+            .transpose()?;
+        Ok(Self {
+            header,
+            options,
+            expression,
+            writer,
+            reference_order: header
+                .contigs()
+                .keys()
+                .enumerate()
+                .map(|(index, name)| (name.as_str(), index))
+                .collect(),
+            reference_normalizer,
+            pending: BinaryHeap::new(),
+            seen: HashSet::new(),
+            input_position: None,
+            output_state: OutputState {
+                position: None,
+                duplicates: duplicate::State::new(options.duplicate_policy),
+            },
+            output_options: OutputOptions {
+                old_record_tag: options.old_record_tag.as_deref(),
+                join_multiallelic: options.join_multiallelic,
+                strict_filter: options.strict_filter,
+            },
+            serial: 0,
+            summary: Summary {
+                read: 0,
+                written: 0,
+                changed: 0,
+                unchanged: 0,
+                unsupported: 0,
+                split: 0,
+                joined: 0,
+                not_selected: 0,
+                target_filtered: 0,
+                skipped: 0,
+                atomized: 0,
+                duplicates: 0,
+                output_format: options.output_format,
+            },
+        })
+    }
+
+    fn write_header(&mut self) -> Result<()> {
+        self.writer.write_header(self.header, HeaderMode::Full)
+    }
+
+    fn push(&mut self, record: RecordBuf, number: u64) -> Result<()> {
+        self.summary.read = self.summary.read.max(number);
+        let reference = self
+            .reference_order
             .get(record.reference_sequence_name())
             .copied()
             .ok_or_else(|| invalid(number, "reference sequence is absent from the header"))?;
@@ -206,70 +277,79 @@ fn normalize_stream(
             .variant_start()
             .map(usize::from)
             .ok_or_else(|| invalid(number, "variant position is missing"))?;
-        validate_input_order(number, reference, position, &mut input_position, &mut seen)?;
+        validate_input_order(
+            number,
+            reference,
+            position,
+            &mut self.input_position,
+            &mut self.seen,
+        )?;
 
-        if options
+        if self
+            .options
             .targets
             .as_ref()
             .is_some_and(|targets| !targets.keeps(&record))
         {
-            summary.target_filtered += 1;
-            let threshold = position.saturating_sub(options.site_window);
+            self.summary.target_filtered += 1;
+            let threshold = position.saturating_sub(self.options.site_window);
             flush_ready(
-                &mut pending,
-                header,
-                writer,
-                &output_options,
+                &mut self.pending,
+                self.header,
+                self.writer,
+                &self.output_options,
                 (reference, threshold),
-                &mut output_state,
-                &mut summary,
+                &mut self.output_state,
+                &mut self.summary,
             )?;
-            continue;
+            return Ok(());
         }
 
-        let selected = expression
+        let selected = self
+            .expression
             .map(|expression| {
                 expression
-                    .evaluate(header, &record)
-                    .map(|truth| options.expression_logic.accepts(truth.site_passes()))
+                    .evaluate(self.header, &record)
+                    .map(|truth| self.options.expression_logic.accepts(truth.site_passes()))
                     .map_err(|error| invalid(number, &format!("evaluating expression: {error}")))
             })
             .transpose()?
             .unwrap_or(true);
-        summary.not_selected += u64::from(!selected);
-        let origin = (selected && options.split_multiallelic && options.old_record_tag.is_some())
-            .then(|| record.clone());
-        let records = if selected && options.split_multiallelic {
+        self.summary.not_selected += u64::from(!selected);
+        let origin =
+            (selected && self.options.split_multiallelic && self.options.old_record_tag.is_some())
+                .then(|| record.clone());
+        let records = if selected && self.options.split_multiallelic {
             split::split(
-                header,
+                self.header,
                 &record,
-                options.keep_sum_ad,
-                options.split_overlaps_missing,
+                self.options.keep_sum_ad,
+                self.options.split_overlaps_missing,
             )?
         } else {
             vec![record]
         };
         if selected && records.len() > 1 {
-            summary.split += 1;
+            self.summary.split += 1;
         }
         for (split_index, mut record) in records.into_iter().enumerate() {
-            if selected && let Some(normalizer) = &mut normalizer {
+            if selected && let Some(normalizer) = &mut self.reference_normalizer {
                 match normalizer.normalize(&mut record)? {
-                    Outcome::Changed => summary.changed += 1,
-                    Outcome::Unchanged => summary.unchanged += 1,
-                    Outcome::Unsupported => summary.unsupported += 1,
+                    Outcome::Changed => self.summary.changed += 1,
+                    Outcome::Unchanged => self.summary.unchanged += 1,
+                    Outcome::Unsupported => self.summary.unsupported += 1,
                     Outcome::Skipped => {
-                        summary.skipped += 1;
+                        self.summary.skipped += 1;
                         continue;
                     }
                 }
             }
-            let (records, atomized) = if selected && options.atomize {
+            let (records, atomized) = if selected && self.options.atomize {
                 atomize::atomize(
-                    header,
+                    self.header,
                     record,
-                    options.atom_overlaps_star,
-                    options.old_record_tag.as_deref(),
+                    self.options.atom_overlaps_star,
+                    self.options.old_record_tag.as_deref(),
                     origin.as_ref().map(|record| atomize::Origin {
                         record,
                         alternate: split_index + 1,
@@ -278,47 +358,48 @@ fn normalize_stream(
             } else {
                 (vec![record], false)
             };
-            summary.atomized += u64::from(atomized);
+            self.summary.atomized += u64::from(atomized);
             for record in records {
                 let normalized_position = record
                     .variant_start()
                     .map(usize::from)
                     .ok_or_else(|| invalid(number, "normalized variant position is missing"))?;
-                pending.push(Reverse(Pending {
+                self.pending.push(Reverse(Pending {
                     reference,
                     position: normalized_position,
-                    serial,
+                    serial: self.serial,
                     input: number,
                     selected,
                     record,
                 }));
-                serial = serial.checked_add(1).ok_or_else(|| {
+                self.serial = self.serial.checked_add(1).ok_or_else(|| {
                     RsomicsError::InvalidInput("output record count exceeds u64".to_owned())
                 })?;
             }
         }
 
-        let threshold = position.saturating_sub(options.site_window);
+        let threshold = position.saturating_sub(self.options.site_window);
         flush_ready(
-            &mut pending,
-            header,
-            writer,
-            &output_options,
+            &mut self.pending,
+            self.header,
+            self.writer,
+            &self.output_options,
             (reference, threshold),
-            &mut output_state,
-            &mut summary,
-        )?;
+            &mut self.output_state,
+            &mut self.summary,
+        )
     }
 
-    flush_all(
-        &mut pending,
-        header,
-        writer,
-        &output_options,
-        &mut output_state,
-        &mut summary,
-    )?;
-    Ok(summary)
+    fn finish(&mut self) -> Result<()> {
+        flush_all(
+            &mut self.pending,
+            self.header,
+            self.writer,
+            &self.output_options,
+            &mut self.output_state,
+            &mut self.summary,
+        )
+    }
 }
 
 fn validate_input_order(
@@ -567,6 +648,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             reference: Some(reference),
             expression: None,
             expression_logic: Logic::Include,
+            regions: None,
             targets: None,
             split_multiallelic: false,
             join_multiallelic: None,
@@ -613,6 +695,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             reference: Some(reference),
             expression: None,
             expression_logic: Logic::Include,
+            regions: None,
             targets: None,
             split_multiallelic: false,
             join_multiallelic: None,

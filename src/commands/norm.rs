@@ -5,7 +5,7 @@ use clap::{Args, ValueEnum};
 use rsomics_common::{Result, RsomicsError, write_atomic};
 
 use crate::cli::CommandOutput;
-use crate::commands::variant::{OutputType, Overlap, read_targets};
+use crate::commands::variant::{OutputType, Overlap, read_regions, read_targets};
 use crate::filter::Logic;
 use crate::norm::{self, MismatchPolicy, Options};
 
@@ -160,6 +160,23 @@ pub(crate) struct Arguments {
     #[arg(short = 'i', long, value_name = "EXPR")]
     include: Option<String>,
 
+    /// Indexed genomic regions, separated by commas
+    #[arg(
+        short = 'r',
+        long,
+        value_name = "REGIONS",
+        conflicts_with = "regions_file"
+    )]
+    regions: Option<String>,
+
+    /// File containing one indexed genomic region per line
+    #[arg(short = 'R', long, value_name = "FILE")]
+    regions_file: Option<PathBuf>,
+
+    /// Indexed-region overlap rule
+    #[arg(long, value_name = "MODE", default_value = "record")]
+    regions_overlap: Overlap,
+
     /// Streaming target regions, separated by commas; prefix with ^ to exclude
     #[arg(
         short = 't',
@@ -227,6 +244,11 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         reference: arguments.reference,
         expression,
         expression_logic,
+        regions: read_regions(
+            arguments.regions,
+            arguments.regions_file.as_deref(),
+            arguments.regions_overlap.into(),
+        )?,
         targets: read_targets(
             arguments.targets,
             arguments.targets_file.as_deref(),

@@ -223,6 +223,52 @@ chr1\t20\tb\tA\tC,G\t.\tPASS\t.\n",
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn indexed_region_modes_match_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf.gz");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index.vcf");
+    let mut writer = bgzf::io::Writer::new(fs::File::create(&input).unwrap());
+    writer.write_all(&fs::read(source).unwrap()).unwrap();
+    writer.try_finish().unwrap();
+    run(
+        Command::new(PathBuf::from(env!("CARGO_BIN_EXE_rsomics-vcf")))
+            .args(["index", input.to_str().unwrap()]),
+    );
+
+    for (mode, oracle_mode) in [("pos", "0"), ("record", "1"), ("variant", "2")] {
+        let ours = body(run(Command::new(PathBuf::from(env!(
+            "CARGO_BIN_EXE_rsomics-vcf"
+        )))
+        .args([
+            "norm",
+            "--remove-duplicates",
+            "exact",
+            "--regions",
+            "chr1:70000,chr1:69990-70010",
+            "--regions-overlap",
+            mode,
+            input.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "--rm-dup",
+            "exact",
+            "--regions",
+            "chr1:70000,chr1:69990-70010",
+            "--regions-overlap",
+            oracle_mode,
+            input.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{mode}");
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn typed_biallelic_join_any_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
