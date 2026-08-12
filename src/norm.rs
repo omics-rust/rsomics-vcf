@@ -1,5 +1,6 @@
 mod atomize;
 mod cardinality;
+mod duplicate;
 mod reference;
 mod split;
 
@@ -15,6 +16,7 @@ use serde::Serialize;
 use crate::format::{
     HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer, trim_line_ending,
 };
+pub(crate) use duplicate::Policy as DuplicatePolicy;
 pub(crate) use reference::MismatchPolicy;
 use reference::{Outcome, ReferenceNormalizer};
 
@@ -26,6 +28,7 @@ pub(crate) struct Options {
     pub(crate) atomize: bool,
     pub(crate) atom_overlaps_star: bool,
     pub(crate) old_record_tag: Option<String>,
+    pub(crate) duplicate_policy: Option<DuplicatePolicy>,
     pub(crate) keep_sum_ad: bool,
     pub(crate) output_format: OutputFormat,
     pub(crate) site_window: usize,
@@ -41,6 +44,7 @@ pub(crate) struct Summary {
     pub(crate) split: u64,
     pub(crate) skipped: u64,
     pub(crate) atomized: u64,
+    pub(crate) duplicates: u64,
     pub(crate) output_format: OutputFormat,
 }
 
@@ -50,6 +54,11 @@ struct Pending {
     serial: u64,
     input: u64,
     record: RecordBuf,
+}
+
+struct OutputState {
+    position: Option<(usize, usize)>,
+    duplicates: duplicate::State,
 }
 
 impl PartialEq for Pending {
@@ -119,7 +128,11 @@ fn normalize_stream(
     let mut pending = BinaryHeap::new();
     let mut seen = HashSet::new();
     let mut input_position = None;
-    let mut output_position = None;
+    let mut output_state = OutputState {
+        position: None,
+        duplicates: duplicate::State::new(options.duplicate_policy),
+    };
+    let mut serial = 0;
     let mut summary = Summary {
         read: 0,
         written: 0,
@@ -129,6 +142,7 @@ fn normalize_stream(
         split: 0,
         skipped: 0,
         atomized: 0,
+        duplicates: 0,
         output_format: options.output_format,
     };
 
@@ -191,14 +205,6 @@ fn normalize_stream(
                     .variant_start()
                     .map(usize::from)
                     .ok_or_else(|| invalid(number, "normalized variant position is missing"))?;
-                let serial = summary
-                    .written
-                    .checked_add(u64::try_from(pending.len()).map_err(|_| {
-                        RsomicsError::InvalidInput("pending record count exceeds u64".to_owned())
-                    })?)
-                    .ok_or_else(|| {
-                        RsomicsError::InvalidInput("output record count exceeds u64".to_owned())
-                    })?;
                 pending.push(Reverse(Pending {
                     reference,
                     position: normalized_position,
@@ -206,6 +212,9 @@ fn normalize_stream(
                     input: number,
                     record,
                 }));
+                serial = serial.checked_add(1).ok_or_else(|| {
+                    RsomicsError::InvalidInput("output record count exceeds u64".to_owned())
+                })?;
             }
         }
 
@@ -216,7 +225,7 @@ fn normalize_stream(
             writer,
             options.old_record_tag.as_deref(),
             (reference, threshold),
-            &mut output_position,
+            &mut output_state,
             &mut summary,
         )?;
     }
@@ -226,7 +235,7 @@ fn normalize_stream(
         header,
         writer,
         options.old_record_tag.as_deref(),
-        &mut output_position,
+        &mut output_state,
         &mut summary,
     )?;
     Ok(summary)
@@ -262,7 +271,7 @@ fn flush_ready(
     writer: &mut impl VariantWriter,
     old_record_tag: Option<&str>,
     through: (usize, usize),
-    output_position: &mut Option<(usize, usize)>,
+    state: &mut OutputState,
     summary: &mut Summary,
 ) -> Result<()> {
     while pending.peek().is_some_and(|Reverse(record)| {
@@ -270,14 +279,7 @@ fn flush_ready(
             || (record.reference == through.0 && record.position <= through.1)
     }) {
         let Reverse(record) = pending.pop().unwrap();
-        write_pending(
-            record,
-            header,
-            writer,
-            old_record_tag,
-            output_position,
-            summary,
-        )?;
+        write_pending(record, header, writer, old_record_tag, state, summary)?;
     }
     Ok(())
 }
@@ -287,18 +289,11 @@ fn flush_all(
     header: &Header,
     writer: &mut impl VariantWriter,
     old_record_tag: Option<&str>,
-    output_position: &mut Option<(usize, usize)>,
+    state: &mut OutputState,
     summary: &mut Summary,
 ) -> Result<()> {
     while let Some(Reverse(record)) = pending.pop() {
-        write_pending(
-            record,
-            header,
-            writer,
-            old_record_tag,
-            output_position,
-            summary,
-        )?;
+        write_pending(record, header, writer, old_record_tag, state, summary)?;
     }
     Ok(())
 }
@@ -308,15 +303,19 @@ fn write_pending(
     header: &Header,
     writer: &mut impl VariantWriter,
     old_record_tag: Option<&str>,
-    output_position: &mut Option<(usize, usize)>,
+    state: &mut OutputState,
     summary: &mut Summary,
 ) -> Result<()> {
     let position = (pending.reference, pending.position);
-    if output_position.is_some_and(|previous| position < previous) {
+    if state.position.is_some_and(|previous| position < previous) {
         return Err(invalid(
             pending.input,
             "normalized position exceeds --site-window; increase the window",
         ));
+    }
+    if state.duplicates.remove(position, &pending.record) {
+        summary.duplicates += 1;
+        return Ok(());
     }
     let number = pending.serial + 1;
     if let Some(tag) = old_record_tag
@@ -337,7 +336,7 @@ fn write_pending(
     } else {
         writer.write_record(header, &pending.record, number)?;
     }
-    *output_position = Some(position);
+    state.position = Some(position);
     summary.written += 1;
     Ok(())
 }
@@ -426,6 +425,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             atomize: false,
             atom_overlaps_star: true,
             old_record_tag: None,
+            duplicate_policy: None,
             keep_sum_ad: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
@@ -465,6 +465,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             atomize: false,
             atom_overlaps_star: true,
             old_record_tag: None,
+            duplicate_policy: None,
             keep_sum_ad: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,

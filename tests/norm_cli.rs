@@ -321,3 +321,72 @@ chr1\t50\t.\tCC\tC,GG\t.\tPASS\t.\n",
         "{output}"
     );
 }
+
+#[test]
+fn public_command_removes_duplicates_by_explicit_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.4\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description=\"SV length\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ts1\tA\tC\t.\tPASS\t.\n\
+chr1\t10\ts2\tA\tG\t.\tPASS\t.\n\
+chr1\t10\ti1\tA\tAT\t.\tPASS\t.\n\
+chr1\t10\ti2\tA\tAG\t.\tPASS\t.\n\
+chr1\t10\to1\tA\t<DEL>\t.\tPASS\tSVLEN=-5\n\
+chr1\t20\te1\tA\tC\t.\tPASS\t.\n\
+chr1\t20\te2\ta\tc\t.\tPASS\t.\n\
+chr1\t20\te3\tA\tG\t.\tPASS\t.\n\
+chr1\t30\tx1\tN\t<DEL>\t.\tPASS\tSVLEN=-10\n\
+chr1\t30\tx2\tN\t<DEL>\t.\tPASS\tSVLEN=-20\n\
+chr1\t30\tx3\tN\t<DEL>\t.\tPASS\tSVLEN=-10\n\
+chr1\t40\tm1\tA\tC,G\t.\tPASS\t.\n\
+chr1\t40\tm2\tA\tG,C\t.\tPASS\t.\n\
+chr1\t40\tm3\tA\tC,C\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    for (policy, expected) in [
+        (
+            "snps",
+            vec!["s1", "i1", "i2", "o1", "e1", "x1", "x2", "x3", "m1"],
+        ),
+        (
+            "indels",
+            vec![
+                "s1", "s2", "i1", "o1", "e1", "e2", "e3", "x1", "x2", "x3", "m1", "m2", "m3",
+            ],
+        ),
+        ("both", vec!["s1", "i1", "o1", "e1", "x1", "x2", "x3", "m1"]),
+        ("all", vec!["s1", "e1", "x1", "m1"]),
+        (
+            "exact",
+            vec!["s1", "s2", "i1", "i2", "o1", "e1", "e3", "x1", "x2", "m1"],
+        ),
+    ] {
+        let output = Command::new(binary())
+            .args([
+                "norm",
+                "--remove-duplicates",
+                policy,
+                input.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{policy}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = String::from_utf8(output.stdout).unwrap();
+        let ids: Vec<_> = output
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| line.split('\t').nth(2))
+            .collect();
+        assert_eq!(ids, expected, "{policy}");
+    }
+}

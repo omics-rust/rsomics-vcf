@@ -154,6 +154,7 @@ mod tests {
         assert!(help.contains("-a, --atomize"), "{help}");
         assert!(help.contains("--atom-overlaps <'*'|'.'>"), "{help}");
         assert!(help.contains("--old-rec-tag <TAG>"), "{help}");
+        assert!(help.contains("--remove-duplicates <POLICY>"), "{help}");
         assert!(help.contains("--keep-sum <TAG>"), "{help}");
         assert!(help.contains("--check-ref <MODE>"), "{help}");
         assert!(help.contains("-w, --site-window <INT>"), "{help}");

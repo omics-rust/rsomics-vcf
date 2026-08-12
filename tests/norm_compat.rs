@@ -408,6 +408,123 @@ chr1\t50\t.\tA\tC,G\t.\tPASS\t.\n",
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn duplicate_policies_match_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("duplicates.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.4\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=SVLEN,Number=A,Type=Integer,Description=\"SV length\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ts1\tA\tC\t.\tPASS\t.\n\
+chr1\t10\ts2\tA\tG\t.\tPASS\t.\n\
+chr1\t10\ti1\tA\tAT\t.\tPASS\t.\n\
+chr1\t10\ti2\tA\tAG\t.\tPASS\t.\n\
+chr1\t10\to1\tA\t<DEL>\t.\tPASS\tSVLEN=-5\n\
+chr1\t20\te1\tA\tC\t.\tPASS\t.\n\
+chr1\t20\te2\ta\tc\t.\tPASS\t.\n\
+chr1\t20\te3\tA\tG\t.\tPASS\t.\n\
+chr1\t30\tx1\tN\t<DEL>\t.\tPASS\tSVLEN=-10\n\
+chr1\t30\tx2\tN\t<DEL>\t.\tPASS\tSVLEN=-20\n\
+chr1\t30\tx3\tN\t<DEL>\t.\tPASS\tSVLEN=-10\n\
+chr1\t40\tm1\tA\tC,G\t.\tPASS\t.\n\
+chr1\t40\tm2\tA\tG,C\t.\tPASS\t.\n\
+chr1\t40\tm3\tA\tC,C\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    for policy in ["snps", "indels", "both", "all", "exact"] {
+        let ours = body(run(Command::new(PathBuf::from(env!(
+            "CARGO_BIN_EXE_rsomics-vcf"
+        )))
+        .args([
+            "norm",
+            "--remove-duplicates",
+            policy,
+            input.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "--rm-dup",
+            policy,
+            input.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{policy}");
+    }
+
+    for output_type in ["v", "z", "b", "u"] {
+        let ours = directory.path().join(format!("ours.{output_type}"));
+        run(
+            Command::new(PathBuf::from(env!("CARGO_BIN_EXE_rsomics-vcf"))).args([
+                "norm",
+                "--remove-duplicates",
+                "exact",
+                "-O",
+                output_type,
+                "-o",
+                ours.to_str().unwrap(),
+                input.to_str().unwrap(),
+            ]),
+        );
+        let decoded = body(run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-Ov",
+            ours.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "--rm-dup",
+            "exact",
+            input.to_str().unwrap(),
+        ])));
+        assert_eq!(decoded, oracle, "{output_type}");
+    }
+
+    let reference = directory.path().join("reference.fa");
+    let realign = directory.path().join("realign.vcf");
+    fs::write(&reference, b">chr1\nAAAAAA\n").unwrap();
+    fs::write(reference.with_extension("fa.fai"), b"chr1\t6\t6\t6\t7\n").unwrap();
+    fs::write(
+        &realign,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=6>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t4\tr1\tA\tAA\t.\tPASS\t.\n\
+chr1\t5\tr2\tA\tAA\t.\tPASS\t.\n",
+    )
+    .unwrap();
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--remove-duplicates",
+        "exact",
+        realign.to_str().unwrap(),
+    ])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--rm-dup",
+        "exact",
+        realign.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn exhaustive_short_allele_atomization_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));

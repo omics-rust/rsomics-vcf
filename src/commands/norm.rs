@@ -21,6 +21,27 @@ enum AtomOverlaps {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RemoveDuplicates {
+    Snps,
+    Indels,
+    Both,
+    All,
+    Exact,
+}
+
+impl From<RemoveDuplicates> for norm::DuplicatePolicy {
+    fn from(value: RemoveDuplicates) -> Self {
+        match value {
+            RemoveDuplicates::Snps => Self::Snps,
+            RemoveDuplicates::Indels => Self::Indels,
+            RemoveDuplicates::Both => Self::Both,
+            RemoveDuplicates::All => Self::All,
+            RemoveDuplicates::Exact => Self::Exact,
+        }
+    }
+}
+
 impl ValueEnum for AtomOverlaps {
     fn value_variants<'a>() -> &'a [Self] {
         &[Self::Star, Self::Missing]
@@ -79,6 +100,10 @@ pub(crate) struct Arguments {
     #[arg(long, value_name = "TAG", requires = "atomize")]
     old_rec_tag: Option<String>,
 
+    /// Remove later records matching this duplicate policy
+    #[arg(long, value_name = "POLICY")]
+    remove_duplicates: Option<RemoveDuplicates>,
+
     /// Preserve FORMAT/AD depth sums while splitting
     #[arg(long, value_name = "TAG", requires = "split_multiallelic")]
     keep_sum: Option<String>,
@@ -107,10 +132,13 @@ pub(crate) struct Arguments {
 }
 
 pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput> {
-    if arguments.reference.is_none() && !arguments.split_multiallelic && !arguments.atomize {
+    if arguments.reference.is_none()
+        && !arguments.split_multiallelic
+        && !arguments.atomize
+        && arguments.remove_duplicates.is_none()
+    {
         return Err(RsomicsError::ConfigError(
-            "norm requires --fasta-ref, --split-multiallelic, --atomize, or a combination"
-                .to_owned(),
+            "norm requires --fasta-ref, --split-multiallelic, --atomize, --remove-duplicates, or a combination".to_owned(),
         ));
     }
     if arguments.keep_sum.as_deref().is_some_and(|tag| tag != "AD") {
@@ -131,6 +159,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         atomize: arguments.atomize,
         atom_overlaps_star: !matches!(arguments.atom_overlaps, Some(AtomOverlaps::Missing)),
         old_record_tag: arguments.old_rec_tag,
+        duplicate_policy: arguments.remove_duplicates.map(Into::into),
         keep_sum_ad: arguments.keep_sum.is_some(),
         output_format: arguments.output_type.into(),
         site_window: arguments.site_window,
