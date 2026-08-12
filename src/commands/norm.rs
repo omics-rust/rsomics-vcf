@@ -48,6 +48,10 @@ pub(crate) struct Arguments {
     #[arg(short = 'm', long)]
     split_multiallelic: bool,
 
+    /// Decompose biallelic MNVs into atomic records
+    #[arg(short = 'a', long)]
+    atomize: bool,
+
     /// REF mismatch behavior: exit, warn, or skip
     #[arg(long, value_name = "MODE", requires = "reference")]
     check_ref: Option<CheckReference>,
@@ -72,9 +76,10 @@ pub(crate) struct Arguments {
 }
 
 pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput> {
-    if arguments.reference.is_none() && !arguments.split_multiallelic {
+    if arguments.reference.is_none() && !arguments.split_multiallelic && !arguments.atomize {
         return Err(RsomicsError::ConfigError(
-            "norm requires --fasta-ref, --split-multiallelic, or both".to_owned(),
+            "norm requires --fasta-ref, --split-multiallelic, --atomize, or a combination"
+                .to_owned(),
         ));
     }
     if json && arguments.output == Path::new("-") {
@@ -87,6 +92,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         reference: arguments.reference,
         split_multiallelic: arguments.split_multiallelic,
         mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
+        atomize: arguments.atomize,
         output_format: arguments.output_type.into(),
         site_window: arguments.site_window,
     };

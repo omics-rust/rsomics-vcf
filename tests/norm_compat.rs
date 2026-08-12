@@ -193,3 +193,74 @@ chr1\t3\t.\tG\tA\t.\tPASS\t.\n",
         assert_eq!(ours, oracle, "{ours_policy}");
     }
 }
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn biallelic_mnv_atomization_matches_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"DP\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+chr1\t10\t.\tACGT\tTGCA\t.\tPASS\tDP=5\tGT\t0/1\n\
+chr1\t20\t.\tACGT\tAGGA\t.\tPASS\tDP=7\tGT\t1/1\n",
+    )
+    .unwrap();
+
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args(["norm", "--atomize", input.to_str().unwrap()])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--atomize",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn split_and_atomize_compose_like_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=AF,Number=A,Type=Float,Description=\"AF\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\t.\tAC\tGT,AT\t.\tPASS\tAF=0.25,0.5\n",
+    )
+    .unwrap();
+
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--split-multiallelic",
+        "--atomize",
+        input.to_str().unwrap(),
+    ])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "-m",
+        "-any",
+        "--atomize",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+}

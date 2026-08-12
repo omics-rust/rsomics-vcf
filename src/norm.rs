@@ -1,3 +1,4 @@
+mod atomize;
 mod reference;
 mod split;
 
@@ -19,6 +20,7 @@ pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
     pub(crate) split_multiallelic: bool,
     pub(crate) mismatch_policy: MismatchPolicy,
+    pub(crate) atomize: bool,
     pub(crate) output_format: OutputFormat,
     pub(crate) site_window: usize,
 }
@@ -32,6 +34,7 @@ pub(crate) struct Summary {
     pub(crate) unsupported: u64,
     pub(crate) split: u64,
     pub(crate) skipped: u64,
+    pub(crate) atomized: u64,
     pub(crate) output_format: OutputFormat,
 }
 
@@ -115,6 +118,7 @@ fn normalize_stream(
         unsupported: 0,
         split: 0,
         skipped: 0,
+        atomized: 0,
         output_format: options.output_format,
     };
 
@@ -155,25 +159,33 @@ fn normalize_stream(
                     }
                 }
             }
-            let normalized_position = record
-                .variant_start()
-                .map(usize::from)
-                .ok_or_else(|| invalid(number, "normalized variant position is missing"))?;
-            let serial = summary
-                .written
-                .checked_add(u64::try_from(pending.len()).map_err(|_| {
-                    RsomicsError::InvalidInput("pending record count exceeds u64".to_owned())
-                })?)
-                .ok_or_else(|| {
-                    RsomicsError::InvalidInput("output record count exceeds u64".to_owned())
-                })?;
-            pending.push(Reverse(Pending {
-                reference,
-                position: normalized_position,
-                serial,
-                input: number,
-                record,
-            }));
+            let (records, atomized) = if options.atomize {
+                atomize::atomize(record)?
+            } else {
+                (vec![record], false)
+            };
+            summary.atomized += u64::from(atomized);
+            for record in records {
+                let normalized_position = record
+                    .variant_start()
+                    .map(usize::from)
+                    .ok_or_else(|| invalid(number, "normalized variant position is missing"))?;
+                let serial = summary
+                    .written
+                    .checked_add(u64::try_from(pending.len()).map_err(|_| {
+                        RsomicsError::InvalidInput("pending record count exceeds u64".to_owned())
+                    })?)
+                    .ok_or_else(|| {
+                        RsomicsError::InvalidInput("output record count exceeds u64".to_owned())
+                    })?;
+                pending.push(Reverse(Pending {
+                    reference,
+                    position: normalized_position,
+                    serial,
+                    input: number,
+                    record,
+                }));
+            }
         }
 
         let threshold = position.saturating_sub(options.site_window);
@@ -310,6 +322,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             reference: Some(reference),
             split_multiallelic: false,
             mismatch_policy: MismatchPolicy::Exit,
+            atomize: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
         };
@@ -345,6 +358,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             reference: Some(reference),
             split_multiallelic: false,
             mismatch_policy: MismatchPolicy::Exit,
+            atomize: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
         };

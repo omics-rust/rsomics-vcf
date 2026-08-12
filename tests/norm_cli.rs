@@ -179,3 +179,35 @@ chr1\t3\t.\tG\tA\t.\tPASS\t.\n",
         1
     );
 }
+
+#[test]
+fn public_command_atomizes_mnvs_without_a_reference() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"DP\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t20\t.\tACGT\tAGGA\t.\tPASS\tDP=7\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args(["norm", "--atomize", input.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8(output.stdout).unwrap();
+    let records: Vec<_> = output
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    assert_eq!(records.len(), 2, "{output}");
+    assert!(records[0].starts_with("chr1\t21\t.\tC\tG"), "{output}");
+    assert!(records[1].starts_with("chr1\t23\t.\tT\tA"), "{output}");
+}
