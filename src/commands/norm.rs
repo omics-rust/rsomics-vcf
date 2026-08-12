@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
-use rsomics_common::{Result, RsomicsError, write_atomic};
+use rsomics_common::{AtomicFile, Result, RsomicsError};
 
 use crate::cli::CommandOutput;
 use crate::commands::variant::{OutputType, Overlap, read_regions, read_targets};
@@ -230,6 +230,10 @@ pub(crate) struct Arguments {
     /// Coordinate window retained for records moved by realignment
     #[arg(short = 'w', long, value_name = "INT", default_value_t = 1000)]
     site_window: usize,
+
+    /// Use INT BGZF compression workers; 0 selects serial output
+    #[arg(long, value_name = "INT", default_value_t = 0)]
+    threads: usize,
 }
 
 pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput> {
@@ -288,11 +292,25 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         site_window: arguments.site_window,
     };
     let summary = if arguments.output == Path::new("-") {
-        norm::write(&arguments.input, &options, io::stdout().lock())?
+        if arguments.threads == 0 {
+            norm::write(&arguments.input, &options, io::stdout().lock())?
+        } else {
+            norm::write_parallel(&arguments.input, &options, io::stdout(), arguments.threads)?
+        }
     } else {
-        write_atomic(&arguments.output, |output| {
-            norm::write(&arguments.input, &options, output)
-        })?
+        let mut transaction = AtomicFile::new(&arguments.output)?;
+        let summary = if arguments.threads == 0 {
+            norm::write(&arguments.input, &options, transaction.file_mut())?
+        } else {
+            norm::write_parallel(
+                &arguments.input,
+                &options,
+                transaction.reopen()?,
+                arguments.threads,
+            )?
+        };
+        transaction.commit()?;
+        summary
     };
     Ok(CommandOutput::Norm { summary })
 }

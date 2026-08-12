@@ -368,6 +368,77 @@ chr1\t10\tt\ta\tt\t.\tPASS\t.\n",
 }
 
 #[test]
+fn parallel_bgzf_norm_output_round_trips_and_rejects_plain_vcf() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tA\tC,G\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    for (kind, extension) in [("z", "vcf.gz"), ("b", "bcf")] {
+        let encoded = directory.path().join(extension);
+        let decoded = directory.path().join(format!("{extension}.vcf"));
+        let normalized = Command::new(binary())
+            .args([
+                "norm",
+                "--split-multiallelic",
+                "--output-type",
+                kind,
+                "--threads",
+                "2",
+                "--output",
+                encoded.to_str().unwrap(),
+                input.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            normalized.status.success(),
+            "{kind}: {}",
+            String::from_utf8_lossy(&normalized.stderr)
+        );
+        let viewed = Command::new(binary())
+            .args([
+                "view",
+                "--output",
+                decoded.to_str().unwrap(),
+                encoded.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(viewed.status.success(), "{kind}");
+        let output = fs::read_to_string(decoded).unwrap();
+        assert_eq!(
+            output.lines().filter(|line| !line.starts_with('#')).count(),
+            2,
+            "{kind}: {output}"
+        );
+    }
+
+    let rejected = Command::new(binary())
+        .args([
+            "norm",
+            "--split-multiallelic",
+            "--threads",
+            "2",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("compression workers require BGZF VCF or BCF output")
+    );
+}
+
+#[test]
 fn invalid_norm_expression_fails_before_writing_output() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.vcf");

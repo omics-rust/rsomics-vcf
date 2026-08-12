@@ -17,7 +17,8 @@ use serde::Serialize;
 use crate::expression::Compiled;
 use crate::filter::Logic;
 use crate::format::{
-    HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer, trim_line_ending,
+    HeaderMode, OutputFormat, ParallelWriter, Reader, RecordScratch, VariantWriter, Writer,
+    trim_line_ending,
 };
 use crate::regions::{IndexedRecords, RegionSelection, RegionSet};
 pub(crate) use duplicate::Policy as DuplicatePolicy;
@@ -169,12 +170,35 @@ impl Pending {
 }
 
 pub(crate) fn write(input: &Path, options: &Options, output: impl Write) -> Result<Summary> {
+    write_with_writer(input, options, Writer::new(output, options.output_format))
+}
+
+pub(crate) fn write_parallel<W>(
+    input: &Path,
+    options: &Options,
+    output: W,
+    workers: usize,
+) -> Result<Summary>
+where
+    W: Write + Send + 'static,
+{
+    write_with_writer(
+        input,
+        options,
+        ParallelWriter::new(output, options.output_format, workers)?,
+    )
+}
+
+fn write_with_writer(
+    input: &Path,
+    options: &Options,
+    mut writer: impl VariantWriter,
+) -> Result<Summary> {
     if options.site_window == 0 {
         return Err(RsomicsError::ConfigError(
             "--site-window must be at least 1".to_owned(),
         ));
     }
-    let mut writer = Writer::new(output, options.output_format);
     let summary = if let Some(regions) = &options.regions {
         if input == Path::new("-") {
             return Err(RsomicsError::ConfigError(

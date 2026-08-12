@@ -166,6 +166,7 @@ mod tests {
         assert!(help.contains("-t, --targets <REGIONS>"), "{help}");
         assert!(help.contains("--targets-overlap <MODE>"), "{help}");
         assert!(help.contains("-S, --sort <METHOD>"), "{help}");
+        assert!(help.contains("--threads <INT>"), "{help}");
         assert!(help.contains("-w, --site-window <INT>"), "{help}");
         assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
     }
