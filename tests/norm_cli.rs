@@ -162,6 +162,56 @@ chr1\t20\ty\tG\tT\t.\tPASS\t.\n",
 }
 
 #[test]
+fn classified_join_modes_keep_unselected_types_separate() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ti1\tA\tAT\t.\tPASS\t.\n\
+chr1\t10\ts1\tA\tC\t.\tPASS\t.\n\
+chr1\t10\ti2\tA\tAG\t.\tPASS\t.\n\
+chr1\t10\ts2\tA\tG\t.\tPASS\t.\n",
+    )
+    .unwrap();
+    for (mode, expected, joined) in [
+        ("snps", vec!["s1;s2", "i1", "i2"], 1),
+        ("indels", vec!["s1", "s2", "i1;i2"], 1),
+        ("both", vec!["s1;s2", "i1;i2"], 2),
+    ] {
+        let output_path = directory.path().join(format!("{mode}.vcf"));
+        let output = Command::new(binary())
+            .args([
+                "--json",
+                "norm",
+                "--join-multiallelic",
+                mode,
+                "--output",
+                output_path.to_str().unwrap(),
+                input.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(summary["result"]["summary"]["joined"], joined, "{mode}");
+        let output = fs::read_to_string(output_path).unwrap();
+        let ids = output
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| line.split('\t').nth(2).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected, "{mode}");
+    }
+}
+
+#[test]
 fn join_rejects_incompatible_reference_alleles() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.vcf");

@@ -270,6 +270,88 @@ chr1\t60\td;h\tA\tC,G\t.\tPASS\t.\tGT:NG:FG\t2/1:20,11,21,.,.,.:d0,d1,d2,h1,.,.\
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn classified_join_modes_match_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ti1\tA\tAT\t.\tPASS\t.\n\
+chr1\t10\ts1\tA\tC\t.\tPASS\t.\n\
+chr1\t10\to1\tA\t<DEL>\t.\tPASS\t.\n\
+chr1\t10\tr1\tA\t.\t.\tPASS\t.\n\
+chr1\t10\tm1\tAC\tGT\t.\tPASS\t.\n\
+chr1\t10\tb1\tA\tA]chr1:80]\t.\tPASS\t.\n\
+chr1\t10\tstar\tA\t*\t.\tPASS\t.\n\
+chr1\t10\ts2\tA\tG\t.\tPASS\t.\n\
+chr1\t10\ti2\tA\tAG\t.\tPASS\t.\n\
+chr1\t10\tm2\tAC\tTT\t.\tPASS\t.\n\
+chr1\t10\to2\tA\t<DUP>\t.\tPASS\t.\n\
+chr1\t10\tr2\tA\t.\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    for (mode, expected_ids) in [
+        (
+            "snps",
+            vec![
+                "r1;r2;s1;s2",
+                "m1",
+                "m2",
+                "i1",
+                "i2",
+                "o1",
+                "o2",
+                "b1",
+                "star",
+            ],
+        ),
+        (
+            "indels",
+            vec![
+                "r1;r2", "s1", "s2", "m1", "m2", "i1;i2", "o1", "o2", "b1", "star",
+            ],
+        ),
+        (
+            "both",
+            vec!["r1;r2;s1;s2", "m1;m2", "i1;i2", "o1;o2", "b1", "star"],
+        ),
+    ] {
+        let ours = body(run(Command::new(PathBuf::from(env!(
+            "CARGO_BIN_EXE_rsomics-vcf"
+        )))
+        .args(["norm", "--join-multiallelic", mode, input.to_str().unwrap()])));
+        let join = format!("+{mode}");
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "-m",
+            &join,
+            input.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{mode}");
+        let ids = ours
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                std::str::from_utf8(line)
+                    .unwrap()
+                    .split('\t')
+                    .nth(2)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected_ids, "{mode}");
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn split_ad_sum_preservation_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));

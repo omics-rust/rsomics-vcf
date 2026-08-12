@@ -18,6 +18,7 @@ use crate::format::{
     HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer, trim_line_ending,
 };
 pub(crate) use duplicate::Policy as DuplicatePolicy;
+pub(crate) use merge::Policy as JoinPolicy;
 pub(crate) use reference::MismatchPolicy;
 use reference::{Outcome, ReferenceNormalizer};
 
@@ -25,7 +26,7 @@ use reference::{Outcome, ReferenceNormalizer};
 pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
     pub(crate) split_multiallelic: bool,
-    pub(crate) join_multiallelic: bool,
+    pub(crate) join_multiallelic: Option<JoinPolicy>,
     pub(crate) split_overlaps_missing: bool,
     pub(crate) mismatch_policy: MismatchPolicy,
     pub(crate) atomize: bool,
@@ -67,7 +68,7 @@ struct OutputState {
 
 struct OutputOptions<'a> {
     old_record_tag: Option<&'a str>,
-    join_multiallelic: bool,
+    join_multiallelic: Option<JoinPolicy>,
 }
 
 impl PartialEq for Pending {
@@ -339,11 +340,19 @@ fn write_coordinate(
     state: &mut OutputState,
     summary: &mut Summary,
 ) -> Result<()> {
-    if options.join_multiallelic && records.len() > 1 {
-        let joined = merge::join(header, records.iter().map(|record| &record.record))?;
-        records[0].record = joined;
-        records.truncate(1);
-        summary.joined += 1;
+    if let Some(policy) = options.join_multiallelic.filter(|_| records.len() > 1) {
+        let (joined, count) =
+            merge::join(policy, header, records.iter().map(|record| &record.record))?;
+        let mut sources = records.into_iter().map(Some).collect::<Vec<_>>();
+        records = joined
+            .into_iter()
+            .map(|(index, record)| {
+                let mut pending = sources[index].take().unwrap();
+                pending.record = record;
+                pending
+            })
+            .collect();
+        summary.joined += count;
     }
     for record in records {
         write_pending(
@@ -481,7 +490,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
         let options = Options {
             reference: Some(reference),
             split_multiallelic: false,
-            join_multiallelic: false,
+            join_multiallelic: None,
             split_overlaps_missing: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
@@ -523,7 +532,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
         let options = Options {
             reference: Some(reference),
             split_multiallelic: false,
-            join_multiallelic: false,
+            join_multiallelic: None,
             split_overlaps_missing: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,

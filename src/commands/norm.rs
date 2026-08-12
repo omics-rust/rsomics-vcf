@@ -39,7 +39,21 @@ enum SplitOverlaps {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum JoinMultiallelic {
+    Snps,
+    Indels,
+    Both,
     Any,
+}
+
+impl From<JoinMultiallelic> for norm::JoinPolicy {
+    fn from(value: JoinMultiallelic) -> Self {
+        match value {
+            JoinMultiallelic::Snps => Self::Snps,
+            JoinMultiallelic::Indels => Self::Indels,
+            JoinMultiallelic::Both => Self::Both,
+            JoinMultiallelic::Any => Self::Any,
+        }
+    }
 }
 
 impl From<RemoveDuplicates> for norm::DuplicatePolicy {
@@ -177,7 +191,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
     let options = Options {
         reference: arguments.reference,
         split_multiallelic: arguments.split_multiallelic,
-        join_multiallelic: arguments.join_multiallelic.is_some(),
+        join_multiallelic: arguments.join_multiallelic.map(Into::into),
         split_overlaps_missing: matches!(arguments.split_overlaps, Some(SplitOverlaps::Missing)),
         mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
         atomize: arguments.atomize,

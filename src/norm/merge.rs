@@ -9,19 +9,86 @@ use noodles_vcf::{
 };
 use rsomics_common::{Result, RsomicsError};
 
+use crate::variant_type;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Policy {
+    Snps,
+    Indels,
+    Both,
+    Any,
+}
+
 pub(super) fn join<'a>(
+    policy: Policy,
     header: &Header,
     records: impl IntoIterator<Item = &'a RecordBuf>,
-) -> Result<RecordBuf> {
+) -> Result<(Vec<(usize, RecordBuf)>, u64)> {
     let records: Vec<_> = records.into_iter().collect();
-    let Some(first) = records.first().copied() else {
+    if records.is_empty() {
         return Err(invalid("cannot join an empty record group"));
-    };
+    }
     if records.len() == 1 {
-        return Ok(first.clone());
+        return Ok((vec![(0, records[0].clone())], 0));
+    }
+    if matches!(policy, Policy::Any) {
+        return Ok((vec![(0, join_group(header, &records)?)], 1));
     }
 
-    let (alleles, mappings) = merge_alleles(&records)?;
+    let mut order = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (index, *record, category(record)))
+        .collect::<Vec<_>>();
+    order.sort_by_key(|entry| entry.2);
+    let targets: &[u32] = match policy {
+        Policy::Snps => &[variant_type::SNP],
+        Policy::Indels => &[variant_type::INDEL],
+        Policy::Both => &[
+            variant_type::SNP,
+            variant_type::MNP,
+            variant_type::INDEL,
+            variant_type::OTHER,
+        ],
+        Policy::Any => unreachable!(),
+    };
+    let mut output = Vec::new();
+    let mut joined = 0u64;
+    let mut cursor = 0;
+    while cursor < order.len() {
+        let mut end = cursor;
+        for target in targets {
+            end = cursor;
+            while end < order.len() && (order[end].2 == 0 || order[end].2 == *target) {
+                end += 1;
+            }
+            if end > cursor {
+                break;
+            }
+        }
+        if end == cursor {
+            end += 1;
+        }
+        let group = &order[cursor..end];
+        let record = if group.len() == 1 {
+            group[0].1.clone()
+        } else {
+            joined += 1;
+            join_group(
+                header,
+                &group.iter().map(|entry| entry.1).collect::<Vec<_>>(),
+            )?
+        };
+        output.push((group[0].0, record));
+        cursor = end;
+    }
+    Ok((output, joined))
+}
+
+fn join_group(header: &Header, records: &[&RecordBuf]) -> Result<RecordBuf> {
+    let first = records[0];
+
+    let (alleles, mappings) = merge_alleles(records)?;
     let mut output = first.clone();
     *output.reference_bases_mut() = alleles[0].clone();
     *output.alternate_bases_mut() = AlternateBases::from(alleles[1..].to_vec());
@@ -35,10 +102,14 @@ pub(super) fn join<'a>(
         .iter()
         .filter_map(|record| record.quality_score())
         .reduce(f32::max);
-    merge_filters(&records, &mut output);
-    fields::merge_info(header, &records, &mappings, &mut output)?;
-    fields::merge_samples(header, &records, &mappings, &mut output)?;
+    merge_filters(records, &mut output);
+    fields::merge_info(header, records, &mappings, &mut output)?;
+    fields::merge_samples(header, records, &mappings, &mut output)?;
     Ok(output)
+}
+
+fn category(record: &RecordBuf) -> u32 {
+    variant_type::record_mask(record) & !variant_type::REF
 }
 
 fn merge_alleles(records: &[&RecordBuf]) -> Result<(Vec<String>, Vec<Vec<usize>>)> {
