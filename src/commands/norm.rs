@@ -23,9 +23,13 @@ pub(crate) struct Arguments {
     #[arg(value_name = "VARIANT", default_value = "-")]
     input: PathBuf,
 
-    /// Indexed FASTA reference
+    /// Indexed FASTA reference for left alignment and REF validation
     #[arg(short = 'f', long = "fasta-ref", value_name = "FILE")]
-    reference: PathBuf,
+    reference: Option<PathBuf>,
+
+    /// Split multiallelic records into biallelic records
+    #[arg(short = 'm', long)]
+    split_multiallelic: bool,
 
     /// Write normalized variants to this file instead of standard output
     #[arg(
@@ -47,6 +51,11 @@ pub(crate) struct Arguments {
 }
 
 pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput> {
+    if arguments.reference.is_none() && !arguments.split_multiallelic {
+        return Err(RsomicsError::ConfigError(
+            "norm requires --fasta-ref, --split-multiallelic, or both".to_owned(),
+        ));
+    }
     if json && arguments.output == Path::new("-") {
         return Err(RsomicsError::ConfigError(
             "--json requires --output because variant data otherwise uses standard output"
@@ -55,6 +64,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
     }
     let options = Options {
         reference: arguments.reference,
+        split_multiallelic: arguments.split_multiallelic,
         output_format: arguments.output_type.into(),
         site_window: arguments.site_window,
     };

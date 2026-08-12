@@ -86,3 +86,37 @@ chr1\t2\t.\tT\tA\t.\tPASS\t.\n",
     assert!(!output.status.success());
     assert_eq!(fs::read(output_path).unwrap(), b"existing");
 }
+
+#[test]
+fn public_command_splits_typed_multiallelic_records_without_a_reference() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=AF,Number=A,Type=Float,Description=\"AF\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.25,0.5\tGT\t1/2\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args(["norm", "--split-multiallelic", input.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.contains("A\tC\t.\tPASS\tAF=0.25\tGT\t1/0"),
+        "{output}"
+    );
+    assert!(
+        output.contains("A\tG\t.\tPASS\tAF=0.5\tGT\t0/1"),
+        "{output}"
+    );
+}

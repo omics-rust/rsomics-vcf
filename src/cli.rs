@@ -150,6 +150,7 @@ mod tests {
         let help = error.to_string();
         assert!(help.contains("Input VCF or BCF file"), "{help}");
         assert!(help.contains("-f, --fasta-ref <FILE>"), "{help}");
+        assert!(help.contains("-m, --split-multiallelic"), "{help}");
         assert!(help.contains("-w, --site-window <INT>"), "{help}");
         assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
     }

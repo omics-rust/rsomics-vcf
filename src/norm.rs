@@ -1,4 +1,5 @@
 mod reference;
+mod split;
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -14,7 +15,8 @@ use reference::{Outcome, ReferenceNormalizer};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Options {
-    pub(crate) reference: PathBuf,
+    pub(crate) reference: Option<PathBuf>,
+    pub(crate) split_multiallelic: bool,
     pub(crate) output_format: OutputFormat,
     pub(crate) site_window: usize,
 }
@@ -26,6 +28,7 @@ pub(crate) struct Summary {
     pub(crate) changed: u64,
     pub(crate) unchanged: u64,
     pub(crate) unsupported: u64,
+    pub(crate) split: u64,
     pub(crate) output_format: OutputFormat,
 }
 
@@ -33,6 +36,7 @@ struct Pending {
     reference: usize,
     position: usize,
     serial: u64,
+    input: u64,
     record: RecordBuf,
 }
 
@@ -90,7 +94,11 @@ fn normalize_stream(
         .enumerate()
         .map(|(index, name)| (name.as_str(), index))
         .collect();
-    let mut normalizer = ReferenceNormalizer::open(&options.reference)?;
+    let mut normalizer = options
+        .reference
+        .as_deref()
+        .map(ReferenceNormalizer::open)
+        .transpose()?;
     let mut scratch = RecordScratch::default();
     let mut pending = BinaryHeap::new();
     let mut seen = HashSet::new();
@@ -102,12 +110,13 @@ fn normalize_stream(
         changed: 0,
         unchanged: 0,
         unsupported: 0,
+        split: 0,
         output_format: options.output_format,
     };
 
     loop {
         let number = summary.read + 1;
-        let Some(mut record) = reader.read_record(header, &mut scratch, number)? else {
+        let Some(record) = reader.read_record(header, &mut scratch, number)? else {
             break;
         };
         summary.read += 1;
@@ -122,21 +131,42 @@ fn normalize_stream(
             .ok_or_else(|| invalid(number, "variant position is missing"))?;
         validate_input_order(number, reference, position, &mut input_position, &mut seen)?;
 
-        match normalizer.normalize(&mut record)? {
-            Outcome::Changed => summary.changed += 1,
-            Outcome::Unchanged => summary.unchanged += 1,
-            Outcome::Unsupported => summary.unsupported += 1,
+        let records = if options.split_multiallelic {
+            split::split(header, &record)?
+        } else {
+            vec![record]
+        };
+        if records.len() > 1 {
+            summary.split += 1;
         }
-        let normalized_position = record
-            .variant_start()
-            .map(usize::from)
-            .ok_or_else(|| invalid(number, "normalized variant position is missing"))?;
-        pending.push(Reverse(Pending {
-            reference,
-            position: normalized_position,
-            serial: number,
-            record,
-        }));
+        for mut record in records {
+            if let Some(normalizer) = &mut normalizer {
+                match normalizer.normalize(&mut record)? {
+                    Outcome::Changed => summary.changed += 1,
+                    Outcome::Unchanged => summary.unchanged += 1,
+                    Outcome::Unsupported => summary.unsupported += 1,
+                }
+            }
+            let normalized_position = record
+                .variant_start()
+                .map(usize::from)
+                .ok_or_else(|| invalid(number, "normalized variant position is missing"))?;
+            let serial = summary
+                .written
+                .checked_add(u64::try_from(pending.len()).map_err(|_| {
+                    RsomicsError::InvalidInput("pending record count exceeds u64".to_owned())
+                })?)
+                .ok_or_else(|| {
+                    RsomicsError::InvalidInput("output record count exceeds u64".to_owned())
+                })?;
+            pending.push(Reverse(Pending {
+                reference,
+                position: normalized_position,
+                serial,
+                input: number,
+                record,
+            }));
+        }
 
         let threshold = position.saturating_sub(options.site_window);
         flush_ready(
@@ -226,11 +256,11 @@ fn write_pending(
     let position = (pending.reference, pending.position);
     if output_position.is_some_and(|previous| position < previous) {
         return Err(invalid(
-            pending.serial,
+            pending.input,
             "normalized position exceeds --site-window; increase the window",
         ));
     }
-    writer.write_record(header, &pending.record, pending.serial)?;
+    writer.write_record(header, &pending.record, pending.serial + 1)?;
     *output_position = Some(position);
     summary.written += 1;
     Ok(())
@@ -269,7 +299,8 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
     fn normalizes_and_reorders_records_within_the_site_window() {
         let (_directory, reference, input) = fixture();
         let options = Options {
-            reference,
+            reference: Some(reference),
+            split_multiallelic: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
         };
@@ -302,7 +333,8 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
         )
         .unwrap();
         let options = Options {
-            reference,
+            reference: Some(reference),
+            split_multiallelic: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
         };
