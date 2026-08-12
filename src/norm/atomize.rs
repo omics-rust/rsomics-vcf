@@ -117,6 +117,7 @@ pub(super) fn atomize(
             &record,
             output_atom.atom.source_alternate - 1,
             false,
+            false,
         )?;
         *output.variant_start_mut() = Some(Position::try_from(position).map_err(|_| {
             RsomicsError::InvalidInput(

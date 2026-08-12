@@ -45,6 +45,7 @@ pub(super) fn split(
     header: &Header,
     record: &RecordBuf,
     keep_sum_ad: bool,
+    overlaps_missing: bool,
 ) -> Result<Vec<RecordBuf>> {
     let alternates = record.alternate_bases().as_ref();
     if alternates.len() < 2 {
@@ -52,7 +53,7 @@ pub(super) fn split(
     }
 
     (0..alternates.len())
-        .map(|alternate| split_one(header, record, alternate, keep_sum_ad))
+        .map(|alternate| split_one(header, record, alternate, keep_sum_ad, overlaps_missing))
         .collect()
 }
 
@@ -61,6 +62,7 @@ pub(super) fn split_one(
     source: &RecordBuf,
     alternate: usize,
     keep_sum_ad: bool,
+    overlaps_missing: bool,
 ) -> Result<RecordBuf> {
     let alternate_count = source.alternate_bases().as_ref().len();
     let mut record = source.clone();
@@ -96,7 +98,13 @@ pub(super) fn split_one(
                 continue;
             };
             if key == "GT" {
-                remap_genotype(value, alternate_count, alternate, sample_index)?;
+                remap_genotype(
+                    value,
+                    alternate_count,
+                    alternate,
+                    sample_index,
+                    overlaps_missing,
+                )?;
                 continue;
             }
             let schema = header
@@ -244,6 +252,7 @@ fn remap_genotype(
     alternate_count: usize,
     alternate: usize,
     sample: usize,
+    overlaps_missing: bool,
 ) -> Result<()> {
     let Some(value) = value else {
         return Ok(());
@@ -264,7 +273,13 @@ fn remap_genotype(
                 sample + 1
             )));
         }
-        *allele.position_mut() = Some(usize::from(position == alternate + 1));
+        *allele.position_mut() = if position == 0 || position == alternate + 1 {
+            Some(usize::from(position != 0))
+        } else if overlaps_missing {
+            None
+        } else {
+            Some(0)
+        };
     }
     Ok(())
 }
@@ -492,7 +507,7 @@ mod tests {
         .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
 
-        let records = split(&header, &record, false).unwrap();
+        let records = split(&header, &record, false, false).unwrap();
         let mut writer = vcf::io::Writer::new(Vec::new());
         for record in &records {
             writer.write_variant_record(&header, record).unwrap();
@@ -514,7 +529,9 @@ chr1\t10\t.\tA\tG\t.\tPASS\tIA=20;IR=5,2;IG=0,30,50\tGT:FA:FR:FG\t0/1:22:7,3:0,3
             .unwrap();
         let raw = vcf::Record::try_from(b"chr1\t10\t.\tA\tC,G\t.\tPASS\tIA=10".as_slice()).unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
-        let error = split(&header, &record, false).unwrap_err().to_string();
+        let error = split(&header, &record, false, false)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("INFO/IA has 1 values, expected 2"),
             "{error}"
@@ -534,7 +551,7 @@ chr1\t10\t.\tA\tG\t.\tPASS\tIA=20;IR=5,2;IG=0,30,50\tGT:FA:FR:FG\t0/1:22:7,3:0,3
             vcf::Record::try_from(b"chr1\t10\t.\tA\tC,G\t.\tPASS\t.\tGT:AD\t1/2:10,3,2".as_slice())
                 .unwrap();
         let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
-        let records = split(&header, &record, true).unwrap();
+        let records = split(&header, &record, true, false).unwrap();
         let mut writer = vcf::io::Writer::new(Vec::new());
         for record in &records {
             writer.write_variant_record(&header, record).unwrap();

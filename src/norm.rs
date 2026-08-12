@@ -24,6 +24,7 @@ use reference::{Outcome, ReferenceNormalizer};
 pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
     pub(crate) split_multiallelic: bool,
+    pub(crate) split_overlaps_missing: bool,
     pub(crate) mismatch_policy: MismatchPolicy,
     pub(crate) atomize: bool,
     pub(crate) atom_overlaps_star: bool,
@@ -166,7 +167,12 @@ fn normalize_stream(
         let origin = (options.split_multiallelic && options.old_record_tag.is_some())
             .then(|| record.clone());
         let records = if options.split_multiallelic {
-            split::split(header, &record, options.keep_sum_ad)?
+            split::split(
+                header,
+                &record,
+                options.keep_sum_ad,
+                options.split_overlaps_missing,
+            )?
         } else {
             vec![record]
         };
@@ -421,6 +427,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
         let options = Options {
             reference: Some(reference),
             split_multiallelic: false,
+            split_overlaps_missing: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
             atom_overlaps_star: true,
@@ -461,6 +468,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
         let options = Options {
             reference: Some(reference),
             split_multiallelic: false,
+            split_overlaps_missing: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
             atom_overlaps_star: true,

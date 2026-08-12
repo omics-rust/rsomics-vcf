@@ -104,6 +104,27 @@ chr1\t10\t.\tA\tC,G\t.\tPASS\tIA=10,20;IR=5,3,2;IG=0,10,20,30,40,50\tGT:FA:FR:FG
         input.to_str().unwrap(),
     ])));
     assert_eq!(ours, oracle);
+
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--split-multiallelic",
+        "--split-overlaps",
+        "missing",
+        input.to_str().unwrap(),
+    ])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "-m",
+        "-any",
+        "--multi-overlaps",
+        ".",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
 }
 
 #[test]

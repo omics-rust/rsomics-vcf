@@ -30,6 +30,12 @@ enum RemoveDuplicates {
     Exact,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SplitOverlaps {
+    Reference,
+    Missing,
+}
+
 impl From<RemoveDuplicates> for norm::DuplicatePolicy {
     fn from(value: RemoveDuplicates) -> Self {
         match value {
@@ -87,6 +93,10 @@ pub(crate) struct Arguments {
     /// Split multiallelic records into biallelic records
     #[arg(short = 'm', long)]
     split_multiallelic: bool,
+
+    /// Replacement for non-selected ALT alleles while splitting
+    #[arg(long, value_name = "MODE", requires = "split_multiallelic")]
+    split_overlaps: Option<SplitOverlaps>,
 
     /// Decompose complex variants into primitive records
     #[arg(short = 'a', long)]
@@ -155,6 +165,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
     let options = Options {
         reference: arguments.reference,
         split_multiallelic: arguments.split_multiallelic,
+        split_overlaps_missing: matches!(arguments.split_overlaps, Some(SplitOverlaps::Missing)),
         mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
         atomize: arguments.atomize,
         atom_overlaps_star: !matches!(arguments.atom_overlaps, Some(AtomOverlaps::Missing)),
