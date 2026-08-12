@@ -4,7 +4,11 @@ use std::path::Path;
 use rsomics_common::{Result, RsomicsError};
 use serde::Serialize;
 
-use crate::format::{HeaderMode, OutputFormat, Reader, RecordScratch, Writer};
+use crate::expression::Compiled;
+use crate::format::{
+    HeaderMode, OutputFormat, ParallelWriter, Reader, RecordScratch, VariantWriter, Writer,
+    reformat_record,
+};
 use crate::regions::{IndexedRecords, RegionSelection, RegionSet};
 
 use super::{Options, Processor, gaps};
@@ -27,24 +31,71 @@ pub(crate) struct Summary {
 }
 
 pub(crate) fn write(input: &Path, options: &StreamOptions, output: impl Write) -> Result<Summary> {
+    let writer = Writer::new(output, options.output_format);
+    write_with_writer(input, options, writer)
+}
+
+pub(crate) fn write_parallel<W>(
+    input: &Path,
+    options: &StreamOptions,
+    output: W,
+    workers: usize,
+) -> Result<Summary>
+where
+    W: Write + Send + 'static,
+{
+    let writer = ParallelWriter::new(output, options.output_format, workers)?;
+    write_with_writer(input, options, writer)
+}
+
+fn write_with_writer(
+    input: &Path,
+    options: &StreamOptions,
+    mut writer: impl VariantWriter,
+) -> Result<Summary> {
     if let Some(regions) = &options.regions {
         if input == Path::new("-") {
             return Err(RsomicsError::ConfigError(
                 "indexed regions require a named input".to_owned(),
             ));
         }
-        return write_indexed(input, regions, options, output);
+        return write_indexed(input, regions, options, &mut writer);
     }
 
     let mut reader = Reader::open(input)?;
-    let (mut header, _, _) = reader.read_header()?;
+    let (mut header, _, schema) = reader.read_header()?;
+    if reader.is_text()
+        && writer.supports_vcf_records()
+        && options.expression.is_some()
+        && options.filter.mask.is_none()
+        && options.filter.soft_filter.is_none()
+        && options.filter.set_genotypes.is_none()
+        && options.gaps.snp_gap.is_none()
+        && options.gaps.indel_gap.is_none()
+        && options.targets.is_none()
+    {
+        let expression = options.expression.as_deref().unwrap();
+        let compiled = Compiled::bind(expression, &header).map_err(|error| {
+            RsomicsError::ConfigError(format!("invalid filter expression: {error}"))
+        })?;
+        if let Some(predicate) = compiled.raw() {
+            return write_raw_text(
+                input,
+                &mut reader,
+                &header,
+                &schema,
+                options,
+                predicate,
+                &mut writer,
+            );
+        }
+    }
     let mut processor = Processor::bind(
         &mut header,
         options.expression.as_deref(),
         options.filter.clone(),
         options.gaps,
     )?;
-    let mut writer = Writer::new(output, options.output_format);
     writer.write_header(&header, HeaderMode::Full)?;
 
     let mut scratch = RecordScratch::default();
@@ -80,11 +131,79 @@ pub(crate) fn write(input: &Path, options: &StreamOptions, output: impl Write) -
     })
 }
 
+fn write_raw_text(
+    input: &Path,
+    reader: &mut Reader,
+    header: &noodles_vcf::Header,
+    schema: &crate::format::HeaderTypes,
+    options: &StreamOptions,
+    predicate: crate::expression::RawPredicate,
+    writer: &mut impl VariantWriter,
+) -> Result<Summary> {
+    writer.write_header(header, HeaderMode::Full)?;
+    let mut raw = Vec::new();
+    let mut canonical = Vec::new();
+    let mut read = 0;
+    let mut written = 0;
+    loop {
+        let number = read + 1;
+        if reader.read_text_record(
+            &mut raw,
+            usize::try_from(number).map_err(|_| {
+                RsomicsError::InvalidInput("variant record count exceeds usize".to_owned())
+            })?,
+        )? == 0
+        {
+            break;
+        }
+        read += 1;
+        reformat_record(&raw, schema, &mut canonical).map_err(|error| {
+            RsomicsError::InvalidInput(format!(
+                "{}: parsing variant record {number}: {error}",
+                input.display()
+            ))
+        })?;
+        normalize_missing_filter(&mut canonical);
+        let passes = predicate.evaluate(&canonical).ok_or_else(|| {
+            RsomicsError::InvalidInput(format!(
+                "{}: evaluating filter expression at record {number}: scalar numeric field has multiple or invalid values",
+                input.display()
+            ))
+        })?;
+        if options.filter.logic.accepts(passes) {
+            written += 1;
+            writer.write_vcf_record(&canonical, written)?;
+        }
+    }
+    writer.finish()?;
+    Ok(Summary {
+        read,
+        written,
+        output_format: options.output_format,
+    })
+}
+
+fn normalize_missing_filter(record: &mut Vec<u8>) {
+    let mut tabs = record
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\t');
+    let Some(start) = tabs.nth(5).map(|(index, _)| index + 1) else {
+        return;
+    };
+    let Some(end) = tabs.next().map(|(index, _)| index) else {
+        return;
+    };
+    if &record[start..end] == b"." {
+        record.splice(start..end, *b"PASS");
+    }
+}
+
 fn write_indexed(
     input: &Path,
     regions: &RegionSet,
     options: &StreamOptions,
-    output: impl Write,
+    writer: &mut impl VariantWriter,
 ) -> Result<Summary> {
     let mut reader = IndexedRecords::open(input, regions)?;
     let mut header = reader.header().clone();
@@ -94,7 +213,6 @@ fn write_indexed(
         options.filter.clone(),
         options.gaps,
     )?;
-    let mut writer = Writer::new(output, options.output_format);
     writer.write_header(&header, HeaderMode::Full)?;
 
     let mut written = 0;
@@ -127,12 +245,14 @@ fn write_indexed(
 #[cfg(test)]
 mod tests {
     use std::fs::{self, File};
+    use std::io::Read;
 
     use crate::format::OutputFormat;
     use crate::index::{self, BuildOptions, IndexKind};
     use crate::regions::{OverlapMode, RegionSelection, RegionSet};
     use crate::variant_type;
     use noodles_bgzf as bgzf;
+    use rsomics_common::AtomicFile;
 
     use super::*;
 
@@ -229,5 +349,38 @@ chr1\t20\t.\tG\tT\t10\tPASS\t.\n",
         assert_eq!(summary.written, 1, "{output}");
         assert_eq!(output.matches("\tdel1\t").count(), 1, "{output}");
         assert!(!output.contains("\tsnv4\t"), "{output}");
+    }
+
+    #[test]
+    fn parallel_filter_commits_owned_bgzf_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("calls.vcf");
+        let output = directory.path().join("filtered.vcf.gz");
+        fs::write(
+            &input,
+            "##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\t.\tA\tC\t10\tPASS\t.\n\
+chr1\t20\t.\tG\tT\t5\tPASS\t.\n",
+        )
+        .unwrap();
+        let options = StreamOptions {
+            output_format: OutputFormat::VcfBgzf,
+            expression: Some("QUAL >= 10".to_owned()),
+            ..StreamOptions::default()
+        };
+        let transaction = AtomicFile::new(&output).unwrap();
+        let summary = write_parallel(&input, &options, transaction.reopen().unwrap(), 2).unwrap();
+        transaction.commit().unwrap();
+
+        let mut decoded = String::new();
+        bgzf::io::Reader::new(File::open(output).unwrap())
+            .read_to_string(&mut decoded)
+            .unwrap();
+        assert_eq!(summary.read, 2);
+        assert_eq!(summary.written, 1);
+        assert!(decoded.contains("chr1\t10\t"), "{decoded}");
+        assert!(!decoded.contains("chr1\t20\t"), "{decoded}");
     }
 }

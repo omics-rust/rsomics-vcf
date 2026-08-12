@@ -28,6 +28,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Filter VCF or BCF records with typed expressions and genomic masks
+    Filter(commands::filter::Arguments),
+
     /// Print VCF headers and the first variant records
     Head(commands::head::Arguments),
 
@@ -47,6 +50,7 @@ enum Command {
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub(crate) enum CommandOutput {
+    Filter { summary: crate::filter::Summary },
     Head { summary: head::Summary },
     Index { outcome: crate::index::Outcome },
     Query { summary: crate::query::Summary },
@@ -63,6 +67,9 @@ pub(crate) fn run() -> process::ExitCode {
 
 fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
     match cli.command {
+        Command::Filter(arguments) => {
+            commands::filter::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
         Command::Head(arguments) => {
             commands::head::execute(arguments, cli.output.json).map(Validation::Valid)
         }
@@ -98,6 +105,17 @@ mod tests {
         assert!(help.contains("Input VCF or BCF file"), "{help}");
         assert!(help.contains("-H, --headers <INT>"), "{help}");
         assert!(help.contains("-s, --samples <INT>"), "{help}");
+    }
+
+    #[test]
+    fn filter_help_uses_family_layout() {
+        let error = rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "filter", "--help"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("Input VCF or BCF file"), "{help}");
+        assert!(help.contains("-i, --include <EXPR>"), "{help}");
+        assert!(help.contains("--threads <INT>"), "{help}");
+        assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
     }
 
     #[test]

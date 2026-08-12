@@ -34,6 +34,7 @@ pub(crate) struct GapOutput {
 }
 
 impl GapOutput {
+    #[cfg(test)]
     pub(crate) fn record(&self) -> &RecordBuf {
         &self.record
     }

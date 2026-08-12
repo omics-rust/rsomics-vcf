@@ -40,7 +40,6 @@ pub(crate) fn mask(reference: &[u8], alternates: &[u8]) -> u32 {
         .fold(0, |mask, alternate| mask | classify(reference, alternate))
 }
 
-#[cfg(test)]
 pub(crate) fn record_mask(record: &noodles_vcf::variant::RecordBuf) -> u32 {
     let reference = record.reference_bases().as_bytes();
     let alternates = record.alternate_bases().as_ref();

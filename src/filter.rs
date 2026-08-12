@@ -1,6 +1,9 @@
 mod gaps;
 mod stream;
 
+pub(crate) use gaps::{Options as GapOptions, SnpGap};
+pub(crate) use stream::{StreamOptions, Summary, write, write_parallel};
+
 use noodles_vcf::{
     self as vcf,
     header::record::value::{Map, map::Filter as HeaderFilter},
@@ -42,7 +45,7 @@ pub(crate) enum Logic {
 }
 
 impl Logic {
-    fn accepts(self, value: bool) -> bool {
+    pub(crate) fn accepts(self, value: bool) -> bool {
         match self {
             Self::Include => value,
             Self::Exclude => !value,
@@ -108,10 +111,12 @@ impl Decision {
         self.disposition
     }
 
+    #[cfg(test)]
     pub(crate) fn site_passes(&self) -> bool {
         self.site_passes
     }
 
+    #[cfg(test)]
     pub(crate) fn sample_passes(&self) -> Option<&[bool]> {
         self.sample_passes.as_deref()
     }
@@ -249,6 +254,7 @@ impl Program {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn failure_filter(&self) -> Option<&str> {
         self.failure_filter.as_deref()
     }

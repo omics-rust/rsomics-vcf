@@ -47,6 +47,7 @@ impl Truth {
         }
     }
 
+    #[cfg(test)]
     fn samples(passes: Vec<bool>) -> Self {
         let selected = vec![true; passes.len()].into_boxed_slice();
         Self::selected_samples(passes, selected)

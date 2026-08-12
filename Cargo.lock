@@ -638,11 +638,12 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rsomics-common"
-version = "0.9.0"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00ecf388c7cccd2792438260c90e121f6de758c519f76ed64ff24b61f2e4ac78"
+checksum = "d9a4246711f13a0fdd9398e7eab3a95b991ac555a52c98f6518252c037508401"
 dependencies = [
  "clap",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",

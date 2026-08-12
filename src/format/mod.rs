@@ -10,7 +10,7 @@ pub(crate) use reader::{Reader, RecordScratch};
 pub(crate) use record::reformat_record;
 pub(crate) use text::HeaderTypes;
 pub(crate) use value::{ValueType, write_f32};
-pub(crate) use writer::Writer;
+pub(crate) use writer::{ParallelWriter, VariantWriter, Writer};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]

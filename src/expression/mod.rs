@@ -1,7 +1,10 @@
 mod bind;
 mod evaluate;
+mod raw;
 mod syntax;
 mod value;
+
+pub(crate) use raw::Predicate as RawPredicate;
 
 use std::fmt;
 
@@ -24,6 +27,10 @@ impl Compiled {
         record: &RecordBuf,
     ) -> Result<evaluate::Truth, evaluate::EvaluateError> {
         evaluate::evaluate(&self.0, header, record)
+    }
+
+    pub(crate) fn raw(&self) -> Option<raw::Predicate> {
+        raw::Predicate::compile(&self.0)
     }
 }
 

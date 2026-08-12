@@ -1,29 +1,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, ValueEnum};
-use rsomics_common::{Context, Result, RsomicsError, write_atomic};
+use clap::Args;
+use rsomics_common::{Result, RsomicsError, write_atomic};
 
 use crate::cli::CommandOutput;
-use crate::view::{
-    self, HeaderMode, IdSelection, Options, OutputFormat, OverlapMode, RegionSelection, RegionSet,
-    SampleSelection, TypeSelection,
-};
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum OutputType {
-    V,
-    Z,
-    B,
-    U,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Overlap {
-    Pos,
-    Record,
-    Variant,
-}
+use crate::commands::variant::{OutputType, Overlap, read_list, read_regions, read_targets};
+use crate::view::{self, HeaderMode, IdSelection, Options, SampleSelection, TypeSelection};
 
 #[derive(Debug, Args)]
 #[command(after_help = "\
@@ -176,12 +159,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         ));
     }
     let options = Options {
-        output_format: match arguments.output_type {
-            OutputType::V => OutputFormat::Vcf,
-            OutputType::Z => OutputFormat::VcfBgzf,
-            OutputType::B => OutputFormat::Bcf,
-            OutputType::U => OutputFormat::BcfRaw,
-        },
+        output_format: arguments.output_type.into(),
         header: if arguments.header_only {
             HeaderMode::HeaderOnly
         } else if arguments.no_header {
@@ -258,85 +236,4 @@ fn read_samples(list: Option<String>, file: Option<&Path>) -> Result<Option<Samp
         exclude,
         force: false,
     }))
-}
-
-fn read_regions(
-    list: Option<String>,
-    file: Option<&Path>,
-    overlap: OverlapMode,
-) -> Result<Option<RegionSet>> {
-    let Some(values) = read_list(list, file, "region")? else {
-        return Ok(None);
-    };
-    RegionSet::parse(values, overlap).map(Some)
-}
-
-fn read_targets(
-    list: Option<String>,
-    file: Option<&Path>,
-    overlap: OverlapMode,
-) -> Result<Option<RegionSelection>> {
-    let list_supplied = list.is_some();
-    let mut exclude = false;
-    let mut target_file = file.map(Path::to_path_buf);
-    if let Some(path) = file
-        && let Some(value) = path.to_str().and_then(|value| value.strip_prefix('^'))
-    {
-        if value.is_empty() {
-            return Err(RsomicsError::InvalidInput(
-                "target file path is empty after ^".to_owned(),
-            ));
-        }
-        target_file = Some(PathBuf::from(value));
-        exclude = true;
-    }
-
-    let Some(mut values) = read_list(list, target_file.as_deref(), "target region")? else {
-        return Ok(None);
-    };
-    if list_supplied && let Some(value) = values.first().and_then(|value| value.strip_prefix('^')) {
-        let value = value.to_owned();
-        if value.is_empty() {
-            return Err(RsomicsError::InvalidInput(
-                "target region list is empty after ^".to_owned(),
-            ));
-        }
-        values[0] = value;
-        exclude = true;
-    }
-    RegionSelection::parse(values, overlap, exclude).map(Some)
-}
-
-fn read_list(list: Option<String>, file: Option<&Path>, kind: &str) -> Result<Option<Vec<String>>> {
-    if let Some(list) = list {
-        return Ok(Some(list.split(',').map(str::to_owned).collect()));
-    }
-    let Some(file) = file else {
-        return Ok(None);
-    };
-    let content = std::fs::read_to_string(file)
-        .rs_with_context(|| format!("reading {kind} list {}", file.display()))?;
-    let values: Vec<_> = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_owned)
-        .collect();
-    if values.is_empty() {
-        return Err(RsomicsError::InvalidInput(format!(
-            "{kind} list is empty: {}",
-            file.display()
-        )));
-    }
-    Ok(Some(values))
-}
-
-impl From<Overlap> for OverlapMode {
-    fn from(value: Overlap) -> Self {
-        match value {
-            Overlap::Pos => Self::Position,
-            Overlap::Record => Self::Record,
-            Overlap::Variant => Self::Variant,
-        }
-    }
 }
