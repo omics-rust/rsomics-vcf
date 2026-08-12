@@ -275,7 +275,8 @@ where
             return Ok(());
         }
         self.finished = true;
-        self.pool.install(|| self.writer.finish()).map(drop)
+        self.pool.install(|| self.writer.flush())?;
+        self.writer.finish().map(drop)
     }
 }
 
@@ -347,6 +348,21 @@ mod tests {
         let mut decoded = String::new();
         reader.read_to_string(&mut decoded).unwrap();
         assert!(decoded.starts_with("##fileformat=VCF"), "{decoded}");
+    }
+
+    #[test]
+    fn parallel_bcf_finishes_and_decodes() {
+        let output = SharedOutput::default();
+        let bytes = output.0.clone();
+        let mut writer = ParallelWriter::new(output, OutputFormat::Bcf, 1).unwrap();
+        writer
+            .write_header(&vcf::Header::default(), HeaderMode::Full)
+            .unwrap();
+        writer.finish().unwrap();
+
+        let compressed = bytes.lock().unwrap().clone();
+        let mut reader = bcf::io::Reader::new(Cursor::new(compressed));
+        reader.read_header().unwrap();
     }
 
     #[test]
