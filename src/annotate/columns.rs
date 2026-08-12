@@ -169,7 +169,7 @@ impl ColumnSpec {
 
 impl BoundColumns {
     pub(crate) fn bind(
-        spec: ColumnSpec,
+        mut spec: ColumnSpec,
         source_kind: SourceKind,
         _target: &Header,
         source: Option<&Header>,
@@ -186,6 +186,21 @@ impl BoundColumns {
                 ));
             }
             SourceKind::Tabular | SourceKind::Variant => {}
+        }
+        if source_kind == SourceKind::Tabular {
+            for (index, field) in spec.fields.iter_mut().enumerate() {
+                if let Column::Transfer(transfer) = field {
+                    transfer.source = SourceField::Tabular(index);
+                }
+            }
+            spec.transfers = spec
+                .fields
+                .iter()
+                .filter_map(|field| match field {
+                    Column::Transfer(transfer) => Some(transfer.clone()),
+                    Column::Match(_) => None,
+                })
+                .collect();
         }
         Ok(Self { spec, source_kind })
     }
@@ -590,5 +605,15 @@ mod tests {
             BoundColumns::bind(variant, SourceKind::Variant, &header, Some(&header)).unwrap();
         assert_eq!(bound.source_kind(), SourceKind::Variant);
         assert_eq!(bound.spec().transfers().len(), 1);
+    }
+
+    #[test]
+    fn binds_tabular_transfer_sources_to_column_positions() {
+        let header = vcf::Header::default();
+        let spec = ColumnSpec::parse("CHROM,FROM,TO,INFO/DB,FMT/X").unwrap();
+        let bound = BoundColumns::bind(spec, SourceKind::Tabular, &header, None).unwrap();
+
+        assert_eq!(bound.spec().transfers()[0].source, SourceField::Tabular(3));
+        assert_eq!(bound.spec().transfers()[1].source, SourceField::Tabular(4));
     }
 }
