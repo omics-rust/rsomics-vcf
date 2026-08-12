@@ -1,3 +1,4 @@
+pub(crate) mod annotate;
 pub(crate) mod filter;
 pub(crate) mod head;
 pub(crate) mod index;

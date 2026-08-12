@@ -84,10 +84,20 @@ impl HeaderPlan {
     }
 
     pub(crate) fn prepare(&self, header: &mut Header) -> Result<()> {
+        self.prepare_with_retained_removals(header, false)
+    }
+
+    pub(crate) fn prepare_with_retained_removals(
+        &self,
+        header: &mut Header,
+        retain: bool,
+    ) -> Result<()> {
         let mut candidate = header.clone();
         append_header_lines(&mut candidate, &self.appended)?;
         validate_removals(&candidate, &self.removals)?;
-        remove_header_definitions(&mut candidate, &self.removals);
+        if !retain {
+            remove_header_definitions(&mut candidate, &self.removals);
+        }
         validate_renames(&candidate, &self.renames)?;
         rename_header_maps(&mut candidate, &self.renames);
         *header = candidate;
@@ -98,6 +108,10 @@ impl HeaderPlan {
         let mut changed = apply_removals(record, &self.removals);
         changed |= apply_renames(record, &self.renames)?;
         Ok(changed)
+    }
+
+    pub(crate) fn apply_renames(&self, record: &mut RecordBuf) -> Result<bool> {
+        apply_renames(record, &self.renames)
     }
 }
 

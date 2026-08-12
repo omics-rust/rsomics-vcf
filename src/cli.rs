@@ -28,6 +28,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Edit and transfer VCF or BCF annotations
+    Annotate(commands::annotate::Arguments),
+
     /// Filter VCF or BCF records with typed expressions and genomic masks
     Filter(commands::filter::Arguments),
 
@@ -53,6 +56,7 @@ enum Command {
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub(crate) enum CommandOutput {
+    Annotate { summary: crate::annotate::Summary },
     Filter { summary: crate::filter::Summary },
     Head { summary: head::Summary },
     Index { outcome: crate::index::Outcome },
@@ -71,6 +75,9 @@ pub(crate) fn run() -> process::ExitCode {
 
 fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
     match cli.command {
+        Command::Annotate(arguments) => {
+            commands::annotate::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
         Command::Filter(arguments) => {
             commands::filter::execute(arguments, cli.output.json).map(Validation::Valid)
         }
@@ -112,6 +119,21 @@ mod tests {
         assert!(help.contains("Input VCF or BCF file"), "{help}");
         assert!(help.contains("-H, --headers <INT>"), "{help}");
         assert!(help.contains("-s, --samples <INT>"), "{help}");
+    }
+
+    #[test]
+    fn annotate_help_uses_family_layout() {
+        let error =
+            rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "annotate", "--help"])
+                .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("Target VCF or BCF file"), "{help}");
+        assert!(help.contains("-a, --annotations <FILE>"), "{help}");
+        assert!(help.contains("-c, --columns <LIST>"), "{help}");
+        assert!(help.contains("-H, --header-line <LINE>"), "{help}");
+        assert!(help.contains("--header-lines <FILE>"), "{help}");
+        assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
+        assert!(help.contains("--threads <INT>"), "{help}");
     }
 
     #[test]

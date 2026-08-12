@@ -4,6 +4,8 @@
 
 The current implementation provides:
 
+- `annotate`: edit headers and records or transfer typed fields from sorted
+  VCF, BCF, BED, and tab-delimited annotation streams.
 - `head`: stream ordered VCF headers and an optional record prefix from plain
   VCF, BGZF-compressed VCF, BCF, or standard input.
 - `filter`: evaluate typed site and sample expressions, annotate failures, and
@@ -18,6 +20,27 @@ The current implementation provides:
   cardinality, genotypes, and cross-field invariants.
 - `view`: convert among VCF, BGZF VCF, raw BCF, and BGZF BCF while selecting
   records, samples, indexed regions, or streaming targets.
+
+`annotate` applies checked header removals and renames, site-format ID edits,
+typed fixed/INFO/FORMAT/GT transfer, explicit sample mapping, allele-aware
+`Number=A`, `R`, and `G` remapping, target expressions, site marking, and
+indexed regions. The annotation join advances over two coordinate-sorted
+streams and retains only records that can still overlap the current target.
+Named output is transactional; all four VCF/BCF encodings and bounded BGZF
+compression workers use the same writer layer as the other commands.
+
+```console
+rsomics-vcf annotate calls.vcf.gz -a db.vcf.gz -c ID,INFO/AF
+rsomics-vcf annotate calls.bcf -a depths.vcf.gz -c FORMAT/DP -s tumor,normal
+rsomics-vcf annotate calls.vcf.gz -x INFO/OLD --rename-annotations names.tsv
+```
+
+Whole FORMAT transfer excludes GT unless `FORMAT/GT` is requested explicitly.
+Missing definitions, incompatible schemas, invalid cardinalities, unavailable
+samples, coordinate regressions, and impossible allele maps fail nonzero.
+Experimental merge logic, dynamic source-column expressions, forced recovery,
+automatic indexing, and provenance stamping are not accepted as placeholder
+options.
 
 `head` writes VCF text, preserves header order, normalizes the standard PASS
 definition, removes BCF-internal `IDX` fields, and renders typed records

@@ -107,7 +107,7 @@ impl AnnotationSource {
 }
 
 impl OverlapFractions {
-    fn validate(self) -> Result<()> {
+    pub(crate) fn validate(self) -> Result<()> {
         if [self.annotation, self.target]
             .into_iter()
             .any(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))

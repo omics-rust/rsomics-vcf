@@ -77,10 +77,11 @@ impl SampleSelection {
             (None, None) => (false, Vec::new()),
             (Some(_), Some(_)) => unreachable!(),
         };
+        let explicit = list.is_some() || file.is_some();
         let requested = requested.into_iter().collect::<HashSet<_>>();
         let mut pairs = Vec::new();
         for (source_index, name) in source.sample_names().iter().enumerate() {
-            let selected = if list.is_none() && file.is_none() {
+            let selected = if !explicit {
                 true
             } else if exclude {
                 !requested.contains(name)
@@ -92,13 +93,13 @@ impl SampleSelection {
             }
             if let Some(target_index) = target.sample_names().get_index_of(name) {
                 pairs.push((source_index, target_index));
-            } else if list.is_some() || file.is_some() {
+            } else if explicit {
                 return Err(invalid(format!(
                     "annotation sample {name:?} is not present in the target"
                 )));
             }
         }
-        if list.is_some() || file.is_some() {
+        if explicit {
             for name in &requested {
                 if !source.sample_names().contains(name) {
                     return Err(invalid(format!(

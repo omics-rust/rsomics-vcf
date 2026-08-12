@@ -138,6 +138,13 @@ impl AnnotationSource {
         }
     }
 
+    pub(crate) fn header(&self) -> Option<&vcf::Header> {
+        match &self.reader {
+            SourceReader::Variant { header, .. } => Some(header),
+            SourceReader::Tabular { .. } => None,
+        }
+    }
+
     fn read_next(&mut self) -> Result<Option<AnnotationRecord>> {
         let serial = match self.last_coordinate {
             Some((_, _, serial)) => serial
