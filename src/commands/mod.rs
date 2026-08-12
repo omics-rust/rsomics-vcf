@@ -1,6 +1,8 @@
 pub(crate) mod filter;
 pub(crate) mod head;
 pub(crate) mod index;
+#[cfg(feature = "norm-preview")]
+pub(crate) mod norm;
 pub(crate) mod query;
 pub(crate) mod validate;
 pub(crate) mod variant;

@@ -143,6 +143,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "cc"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d262e149917187838d5b42777c8253bcb64500067342904e7d429499a6f277e"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -328,6 +338,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "find-msvc-tools"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -409,6 +425,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libdeflate-sys"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72753e0008ea87963d2f0770042d0df7abe51fafbb8dcaf618ac440f2f1fec0a"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "libdeflater"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1ee41cf6fb1bb6030dfb59ffb7bc01ab26aade44142084c87f0fc7a1658fe71"
+dependencies = [
+ "libdeflate-sys",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -438,10 +472,22 @@ checksum = "a5020d4ffe9293ea72a89ccb3eda536de9175e43269db0fff3696ee7323472fe"
 dependencies = [
  "indexmap",
  "memchr",
- "noodles-bgzf",
+ "noodles-bgzf 0.49.0",
  "noodles-core",
  "noodles-csi",
  "noodles-vcf",
+]
+
+[[package]]
+name = "noodles-bgzf"
+version = "0.47.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d22589ec50582fa0c3e629d27e5263fc5ff5d436955648ba601b7ac4155fbf2"
+dependencies = [
+ "bytes",
+ "crossbeam-channel",
+ "libdeflater",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -474,7 +520,19 @@ dependencies = [
  "bit-vec",
  "bstr",
  "indexmap",
- "noodles-bgzf",
+ "noodles-bgzf 0.49.0",
+ "noodles-core",
+]
+
+[[package]]
+name = "noodles-fasta"
+version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0e6a772d7a5cb566196d1a1806c4471ad63bc6ffad5b2d549e9602708a9aaab"
+dependencies = [
+ "bstr",
+ "memchr",
+ "noodles-bgzf 0.47.0",
  "noodles-core",
 ]
 
@@ -486,7 +544,7 @@ checksum = "b9ce630d8bbc7de9e6f1922f756c56965781108fa9916d5d06f250a0ebeae62b"
 dependencies = [
  "bstr",
  "indexmap",
- "noodles-bgzf",
+ "noodles-bgzf 0.49.0",
  "noodles-core",
  "noodles-csi",
 ]
@@ -500,7 +558,7 @@ dependencies = [
  "bstr",
  "flate2",
  "noodles-bcf",
- "noodles-bgzf",
+ "noodles-bgzf 0.49.0",
  "noodles-core",
  "noodles-csi",
  "noodles-vcf",
@@ -514,7 +572,7 @@ checksum = "84124ca75e709bf92b3ec8298ed0c655330774deed37cb8ef2ef5ece4b2a824c"
 dependencies = [
  "indexmap",
  "memchr",
- "noodles-bgzf",
+ "noodles-bgzf 0.49.0",
  "noodles-core",
  "noodles-csi",
  "noodles-tabix",
@@ -660,6 +718,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsomics-seqio"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18923c9db5cb7ee3429681c889fd40a5c207a9f0782ae5859e5446d58eaa817d"
+dependencies = [
+ "crossbeam-channel",
+ "flate2",
+ "noodles-bgzf 0.47.0",
+ "noodles-core",
+ "noodles-fasta",
+ "rsomics-common",
+]
+
+[[package]]
 name = "rsomics-vcf"
 version = "0.2.0"
 dependencies = [
@@ -668,7 +740,7 @@ dependencies = [
  "criterion",
  "flate2",
  "noodles-bcf",
- "noodles-bgzf",
+ "noodles-bgzf 0.49.0",
  "noodles-core",
  "noodles-csi",
  "noodles-tabix",
@@ -678,6 +750,7 @@ dependencies = [
  "regex",
  "rsomics-common",
  "rsomics-help",
+ "rsomics-seqio",
  "serde",
  "serde_json",
  "tempfile",
@@ -747,6 +820,12 @@ dependencies = [
  "serde_core",
  "zmij",
 ]
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "simd-adler32"

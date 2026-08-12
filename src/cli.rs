@@ -37,6 +37,10 @@ enum Command {
     /// Create or inspect random-access indexes
     Index(commands::index::Arguments),
 
+    #[cfg(feature = "norm-preview")]
+    /// Normalize variants against an indexed reference
+    Norm(commands::norm::Arguments),
+
     /// Extract variant fields with a typed format string
     Query(commands::query::Arguments),
 
@@ -50,12 +54,28 @@ enum Command {
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub(crate) enum CommandOutput {
-    Filter { summary: crate::filter::Summary },
-    Head { summary: head::Summary },
-    Index { outcome: crate::index::Outcome },
-    Query { summary: crate::query::Summary },
-    Validate { report: crate::validate::Report },
-    View { summary: crate::view::Summary },
+    Filter {
+        summary: crate::filter::Summary,
+    },
+    Head {
+        summary: head::Summary,
+    },
+    Index {
+        outcome: crate::index::Outcome,
+    },
+    #[cfg(feature = "norm-preview")]
+    Norm {
+        summary: crate::norm::Summary,
+    },
+    Query {
+        summary: crate::query::Summary,
+    },
+    Validate {
+        report: crate::validate::Report,
+    },
+    View {
+        summary: crate::view::Summary,
+    },
 }
 
 #[must_use]
@@ -75,6 +95,10 @@ fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
         }
         Command::Index(arguments) => {
             commands::index::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
+        #[cfg(feature = "norm-preview")]
+        Command::Norm(arguments) => {
+            commands::norm::execute(arguments, cli.output.json).map(Validation::Valid)
         }
         Command::Query(arguments) => {
             commands::query::execute(arguments, cli.output.json).map(Validation::Valid)
@@ -115,6 +139,18 @@ mod tests {
         assert!(help.contains("Input VCF or BCF file"), "{help}");
         assert!(help.contains("-i, --include <EXPR>"), "{help}");
         assert!(help.contains("--threads <INT>"), "{help}");
+        assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
+    }
+
+    #[cfg(feature = "norm-preview")]
+    #[test]
+    fn norm_help_uses_family_layout() {
+        let error = rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "norm", "--help"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("Input VCF or BCF file"), "{help}");
+        assert!(help.contains("-f, --fasta-ref <FILE>"), "{help}");
+        assert!(help.contains("-w, --site-window <INT>"), "{help}");
         assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
     }
 

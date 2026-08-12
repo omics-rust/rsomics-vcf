@@ -13,6 +13,9 @@ authors = ["Zane Leong <efd@live.com>"]
 categories = ["science", "command-line-utilities"]
 keywords = ["vcf", "bcf", "bioinformatics", "variants", "genomics"]
 
+[features]
+norm-preview = ["dep:rsomics-seqio"]
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 bstr = "1"
@@ -28,6 +31,7 @@ rayon = "1"
 regex = "1"
 rsomics-common = "0.12"
 rsomics-help = "0.4"
+rsomics-seqio = { version = "0.6", optional = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
