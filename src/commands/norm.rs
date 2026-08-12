@@ -15,6 +15,25 @@ enum CheckReference {
     Skip,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum AtomOverlaps {
+    Star,
+    Missing,
+}
+
+impl ValueEnum for AtomOverlaps {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::Star, Self::Missing]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(match self {
+            Self::Star => clap::builder::PossibleValue::new("*"),
+            Self::Missing => clap::builder::PossibleValue::new("."),
+        })
+    }
+}
+
 impl From<CheckReference> for MismatchPolicy {
     fn from(value: CheckReference) -> Self {
         match value {
@@ -48,9 +67,13 @@ pub(crate) struct Arguments {
     #[arg(short = 'm', long)]
     split_multiallelic: bool,
 
-    /// Decompose biallelic MNVs into atomic records
+    /// Decompose complex variants into primitive records
     #[arg(short = 'a', long)]
     atomize: bool,
+
+    /// Allele used for conflicts between overlapping atoms
+    #[arg(long, value_name = "'*'|'.'", requires = "atomize")]
+    atom_overlaps: Option<AtomOverlaps>,
 
     /// Preserve FORMAT/AD depth sums while splitting
     #[arg(long, value_name = "TAG", requires = "split_multiallelic")]
@@ -102,6 +125,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         split_multiallelic: arguments.split_multiallelic,
         mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
         atomize: arguments.atomize,
+        atom_overlaps_star: !matches!(arguments.atom_overlaps, Some(AtomOverlaps::Missing)),
         keep_sum_ad: arguments.keep_sum.is_some(),
         output_format: arguments.output_type.into(),
         site_window: arguments.site_window,

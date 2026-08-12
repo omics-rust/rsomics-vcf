@@ -12,6 +12,8 @@ use noodles_vcf::{
 };
 use rsomics_common::{Result, RsomicsError};
 
+use super::cardinality::{combinations, infer_ploidy};
+
 #[derive(Clone, Copy)]
 struct SampleProjection {
     alternate_count: usize,
@@ -54,7 +56,7 @@ pub(super) fn split(
         .collect()
 }
 
-fn split_one(
+pub(super) fn split_one(
     header: &Header,
     source: &RecordBuf,
     alternate: usize,
@@ -440,22 +442,6 @@ fn genotype_index(ploidy: usize, selected: usize, copies: usize) -> Option<usize
         let allele = usize::from(allele_index >= ploidy - copies) * selected;
         combinations(allele + allele_index, allele_index + 1)
             .and_then(|offset| index.checked_add(offset))
-    })
-}
-
-fn infer_ploidy(alleles: usize, values: usize) -> Option<usize> {
-    (1..=64).find(|&ploidy| combinations(alleles + ploidy - 1, ploidy) == Some(values))
-}
-
-fn combinations(n: usize, k: usize) -> Option<usize> {
-    if k > n {
-        return Some(0);
-    }
-    let k = k.min(n - k);
-    (1..=k).try_fold(1usize, |value, divisor| {
-        value
-            .checked_mul(n - k + divisor)
-            .map(|product| product / divisor)
     })
 }
 

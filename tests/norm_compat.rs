@@ -1,5 +1,6 @@
 #![cfg(feature = "norm-preview")]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -266,6 +267,123 @@ chr1\t20\t.\tACGT\tAGGA\t.\tPASS\tDP=7\tGT\t1/1\n",
         input.to_str().unwrap(),
     ])));
     assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn complex_and_multiallelic_atomization_matches_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=IA,Number=A,Type=Integer,Description=\"A\">\n\
+##INFO=<ID=IR,Number=R,Type=Integer,Description=\"R\">\n\
+##INFO=<ID=IG,Number=G,Type=Integer,Description=\"G\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"AD\">\n\
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"PL\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t10\tb1\tAC\tG\t50\tPASS\tIA=7;IR=9,4;IG=1,2,3\tGT:AD:PL\t0/1:9,4:0,10,20\t1:20,7:5,15\n\
+chr1\t20\tb2\tAC\tGTG\t50\tPASS\tIA=8;IR=10,5;IG=1,2,3\tGT:AD:PL\t1/1:10,5:0,10,20\t1:20,7:5,15\n\
+chr1\t30\tb3\tACG\tAT\t50\tPASS\tIA=9;IR=11,6;IG=1,2,3\tGT:AD:PL\t0/1:11,6:0,10,20\t0:20,7:5,15\n\
+chr1\t40\tb4\tCA\tTCG\t50\tPASS\tIA=10;IR=12,7;IG=1,2,3\tGT:AD:PL\t0/1:12,7:0,10,20\t1:20,7:5,15\n\
+chr1\t50\tm1\tCC\tC,GG\t50\tPASS\tIA=3,8;IR=10,4,6;IG=0,1,2,3,4,5\tGT:AD:PL\t1/2:10,4,6:0,10,20,30,40,50\t0|2:20,1,7:0,5,10,15,20,25\n",
+    )
+    .unwrap();
+
+    for overlap in ["*", "."] {
+        let ours = body(run(Command::new(PathBuf::from(env!(
+            "CARGO_BIN_EXE_rsomics-vcf"
+        )))
+        .args([
+            "norm",
+            "--atomize",
+            "--atom-overlaps",
+            overlap,
+            input.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "--atomize",
+            "--atom-overlaps",
+            overlap,
+            input.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{overlap}");
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn exhaustive_short_allele_atomization_matches_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input_path = directory.path().join("input.vcf");
+    let sequences = short_sequences();
+    let record_count = sequences.len() * (sequences.len() - 1);
+    let mut input = format!(
+        "##fileformat=VCFv4.3\n##contig=<ID=chr1,length={}>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+        record_count * 4 + 4
+    );
+    let mut position = 1;
+    for reference in &sequences {
+        for alternate in &sequences {
+            if reference == alternate {
+                continue;
+            }
+            writeln!(
+                input,
+                "chr1\t{position}\t.\t{reference}\t{alternate}\t.\tPASS\t."
+            )
+            .unwrap();
+            position += 4;
+        }
+    }
+    fs::write(&input_path, input).unwrap();
+
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args(["norm", "--atomize", input_path.to_str().unwrap()])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--atomize",
+        input_path.to_str().unwrap(),
+    ])));
+    let ours = String::from_utf8(ours).unwrap();
+    let oracle = String::from_utf8(oracle).unwrap();
+    let ours_lines: Vec<_> = ours.lines().collect();
+    let oracle_lines: Vec<_> = oracle.lines().collect();
+    for (index, (ours, oracle)) in ours_lines.iter().zip(&oracle_lines).enumerate() {
+        assert_eq!(ours, oracle, "output line {}", index + 1);
+    }
+    assert_eq!(ours_lines.len(), oracle_lines.len());
+}
+
+fn short_sequences() -> Vec<String> {
+    let mut sequences = Vec::new();
+    for length in 1..=3 {
+        let count = 4usize.pow(length);
+        for value in 0..count {
+            let mut value = value;
+            let mut sequence = vec![b'A'; length as usize];
+            for base in sequence.iter_mut().rev() {
+                *base = b"ACGT"[value % 4];
+                value /= 4;
+            }
+            sequences.push(String::from_utf8(sequence).unwrap());
+        }
+    }
+    sequences
 }
 
 #[test]

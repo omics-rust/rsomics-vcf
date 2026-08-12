@@ -1,4 +1,5 @@
 mod atomize;
+mod cardinality;
 mod reference;
 mod split;
 
@@ -21,6 +22,7 @@ pub(crate) struct Options {
     pub(crate) split_multiallelic: bool,
     pub(crate) mismatch_policy: MismatchPolicy,
     pub(crate) atomize: bool,
+    pub(crate) atom_overlaps_star: bool,
     pub(crate) keep_sum_ad: bool,
     pub(crate) output_format: OutputFormat,
     pub(crate) site_window: usize,
@@ -162,7 +164,7 @@ fn normalize_stream(
                 }
             }
             let (records, atomized) = if options.atomize {
-                atomize::atomize(record)?
+                atomize::atomize(header, record, options.atom_overlaps_star)?
             } else {
                 (vec![record], false)
             };
@@ -325,6 +327,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             split_multiallelic: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
+            atom_overlaps_star: true,
             keep_sum_ad: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
@@ -362,6 +365,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             split_multiallelic: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
+            atom_overlaps_star: true,
             keep_sum_ad: false,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
