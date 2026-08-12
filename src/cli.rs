@@ -151,6 +151,7 @@ mod tests {
         assert!(help.contains("Input VCF or BCF file"), "{help}");
         assert!(help.contains("-f, --fasta-ref <FILE>"), "{help}");
         assert!(help.contains("-m, --split-multiallelic"), "{help}");
+        assert!(help.contains("--strict-filter"), "{help}");
         assert!(help.contains("--split-overlaps <MODE>"), "{help}");
         assert!(help.contains("-a, --atomize"), "{help}");
         assert!(help.contains("--atom-overlaps <'*'|'.'>"), "{help}");

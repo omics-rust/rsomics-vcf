@@ -21,6 +21,7 @@ pub(crate) enum Policy {
 
 pub(super) fn join<'a>(
     policy: Policy,
+    strict_filter: bool,
     header: &Header,
     records: impl IntoIterator<Item = &'a RecordBuf>,
 ) -> Result<(Vec<(usize, RecordBuf)>, u64)> {
@@ -32,7 +33,7 @@ pub(super) fn join<'a>(
         return Ok((vec![(0, records[0].clone())], 0));
     }
     if matches!(policy, Policy::Any) {
-        return Ok((vec![(0, join_group(header, &records)?)], 1));
+        return Ok((vec![(0, join_group(header, &records, strict_filter)?)], 1));
     }
 
     let mut order = records
@@ -77,6 +78,7 @@ pub(super) fn join<'a>(
             join_group(
                 header,
                 &group.iter().map(|entry| entry.1).collect::<Vec<_>>(),
+                strict_filter,
             )?
         };
         output.push((group[0].0, record));
@@ -85,7 +87,7 @@ pub(super) fn join<'a>(
     Ok((output, joined))
 }
 
-fn join_group(header: &Header, records: &[&RecordBuf]) -> Result<RecordBuf> {
+fn join_group(header: &Header, records: &[&RecordBuf], strict_filter: bool) -> Result<RecordBuf> {
     let first = records[0];
 
     let (alleles, mappings) = merge_alleles(records)?;
@@ -102,7 +104,7 @@ fn join_group(header: &Header, records: &[&RecordBuf]) -> Result<RecordBuf> {
         .iter()
         .filter_map(|record| record.quality_score())
         .reduce(f32::max);
-    merge_filters(records, &mut output);
+    merge_filters(records, strict_filter, &mut output);
     fields::merge_info(header, records, &mappings, &mut output)?;
     fields::merge_samples(header, records, &mappings, &mut output)?;
     Ok(output)
@@ -185,27 +187,38 @@ fn expand_alleles(alleles: &mut [String], suffix: &str) {
     }
 }
 
-fn merge_filters(records: &[&RecordBuf], output: &mut RecordBuf) {
-    let mut filters: Filters = records[0]
-        .filters()
-        .as_ref()
-        .iter()
-        .filter(|filter| filter.as_str() != "PASS")
-        .cloned()
-        .collect();
-    filters.extend(
-        records
+fn merge_filters(records: &[&RecordBuf], strict: bool, output: &mut RecordBuf) {
+    for record in &records[1..] {
+        if strict
+            && record
+                .filters()
+                .as_ref()
+                .iter()
+                .any(|filter| filter.as_str() == "PASS")
+        {
+            *output.filters_mut() = record.filters().clone();
+            continue;
+        }
+        let additions = record
+            .filters()
+            .as_ref()
             .iter()
-            .skip(1)
-            .flat_map(|record| record.filters().as_ref())
             .filter(|filter| filter.as_str() != "PASS")
-            .cloned(),
-    );
-    *output.filters_mut() = if filters.as_ref().is_empty() {
-        Filters::pass()
-    } else {
-        filters
-    };
+            .cloned()
+            .collect::<Vec<_>>();
+        if additions.is_empty() {
+            continue;
+        }
+        let mut filters: Filters = output
+            .filters()
+            .as_ref()
+            .iter()
+            .filter(|filter| filter.as_str() != "PASS")
+            .cloned()
+            .collect();
+        filters.extend(additions);
+        *output.filters_mut() = filters;
+    }
 }
 
 fn invalid(message: impl Into<String>) -> RsomicsError {

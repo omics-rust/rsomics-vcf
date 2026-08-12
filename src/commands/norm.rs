@@ -119,6 +119,10 @@ pub(crate) struct Arguments {
     #[arg(long, value_name = "MODE", conflicts_with = "split_multiallelic")]
     join_multiallelic: Option<JoinMultiallelic>,
 
+    /// Reset prior filters when a later joined record is PASS
+    #[arg(long, requires = "join_multiallelic")]
+    strict_filter: bool,
+
     /// Replacement for non-selected ALT alleles while splitting
     #[arg(long, value_name = "MODE", requires = "split_multiallelic")]
     split_overlaps: Option<SplitOverlaps>,
@@ -192,6 +196,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         reference: arguments.reference,
         split_multiallelic: arguments.split_multiallelic,
         join_multiallelic: arguments.join_multiallelic.map(Into::into),
+        strict_filter: arguments.strict_filter,
         split_overlaps_missing: matches!(arguments.split_overlaps, Some(SplitOverlaps::Missing)),
         mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
         atomize: arguments.atomize,

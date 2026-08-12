@@ -162,6 +162,50 @@ chr1\t20\ty\tG\tT\t.\tPASS\t.\n",
 }
 
 #[test]
+fn strict_filter_uses_upstream_join_precedence() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+##FILTER=<ID=q10,Description=\"q10\">\n\
+##FILTER=<ID=s20,Description=\"s20\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tA\tC\t.\tq10\t.\n\
+chr1\t10\tb\tA\tG\t.\tPASS\t.\n\
+chr1\t20\ta\tA\tC\t.\tPASS\t.\n\
+chr1\t20\tb\tA\tG\t.\tq10\t.\n\
+chr1\t30\ta\tA\tC\t.\tq10\t.\n\
+chr1\t30\tb\tA\tG\t.\tPASS\t.\n\
+chr1\t30\tc\tA\tT\t.\ts20\t.\n",
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--join-multiallelic",
+            "any",
+            "--strict-filter",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let filters = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.split('\t').nth(6).unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(filters, ["PASS", "q10", "s20"]);
+}
+
+#[test]
 fn classified_join_modes_keep_unselected_types_separate() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.vcf");

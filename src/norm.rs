@@ -27,6 +27,7 @@ pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
     pub(crate) split_multiallelic: bool,
     pub(crate) join_multiallelic: Option<JoinPolicy>,
+    pub(crate) strict_filter: bool,
     pub(crate) split_overlaps_missing: bool,
     pub(crate) mismatch_policy: MismatchPolicy,
     pub(crate) atomize: bool,
@@ -69,6 +70,7 @@ struct OutputState {
 struct OutputOptions<'a> {
     old_record_tag: Option<&'a str>,
     join_multiallelic: Option<JoinPolicy>,
+    strict_filter: bool,
 }
 
 impl PartialEq for Pending {
@@ -145,6 +147,7 @@ fn normalize_stream(
     let output_options = OutputOptions {
         old_record_tag: options.old_record_tag.as_deref(),
         join_multiallelic: options.join_multiallelic,
+        strict_filter: options.strict_filter,
     };
     let mut serial = 0;
     let mut summary = Summary {
@@ -341,8 +344,12 @@ fn write_coordinate(
     summary: &mut Summary,
 ) -> Result<()> {
     if let Some(policy) = options.join_multiallelic.filter(|_| records.len() > 1) {
-        let (joined, count) =
-            merge::join(policy, header, records.iter().map(|record| &record.record))?;
+        let (joined, count) = merge::join(
+            policy,
+            options.strict_filter,
+            header,
+            records.iter().map(|record| &record.record),
+        )?;
         let mut sources = records.into_iter().map(Some).collect::<Vec<_>>();
         records = joined
             .into_iter()
@@ -491,6 +498,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             reference: Some(reference),
             split_multiallelic: false,
             join_multiallelic: None,
+            strict_filter: false,
             split_overlaps_missing: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
@@ -533,6 +541,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             reference: Some(reference),
             split_multiallelic: false,
             join_multiallelic: None,
+            strict_filter: false,
             split_overlaps_missing: false,
             mismatch_policy: MismatchPolicy::Exit,
             atomize: false,
