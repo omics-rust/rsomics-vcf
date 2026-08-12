@@ -290,10 +290,7 @@ impl GapBuffer {
 
     fn drain_ready(&mut self, position: usize) -> Result<Vec<GapOutput>> {
         let mut output = Vec::new();
-        loop {
-            let Some(entry) = self.entries.front() else {
-                break;
-            };
+        while let Some(entry) = self.entries.front() {
             let snp_safe = match self.options.snp_gap {
                 Some(gap) => {
                     entry.end.checked_add(gap.distance).ok_or_else(|| {
