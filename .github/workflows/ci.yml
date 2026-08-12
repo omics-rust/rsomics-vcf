@@ -42,6 +42,10 @@ jobs:
         if: matrix.target == 'linux-x86_64'
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+      - name: Benchmark harness syntax
+        if: matrix.target == 'linux-x86_64'
+        run: bash -n benchmarks/*.sh
+
       - name: Test debug
         run: cargo test --locked --all-features
 
