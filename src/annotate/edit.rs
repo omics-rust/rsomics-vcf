@@ -1,5 +1,6 @@
+mod samples;
+
 use std::collections::HashSet;
-use std::path::Path;
 
 use noodles_vcf::{
     Header,
@@ -13,6 +14,9 @@ use noodles_vcf::{
     },
 };
 use rsomics_common::{Result, RsomicsError};
+
+pub(crate) use self::samples::SampleSelection;
+use self::samples::{FormatPlan, prepare_definition as prepare_format_definition};
 
 use super::{
     columns::{BoundColumns, Destination, SourceField, SourceKind, Transfer, WriteMode},
@@ -32,16 +36,13 @@ struct InfoPlan {
 struct BoundTransfer {
     transfer: Transfer,
     info: Option<InfoPlan>,
+    format: Option<FormatPlan>,
 }
 
 pub(crate) struct Editor {
     source_kind: SourceKind,
     transfers: Vec<BoundTransfer>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SampleSelection {
-    source_to_target: Vec<(usize, usize)>,
+    samples: Option<SampleSelection>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,110 +51,6 @@ enum State<T> {
     Missing,
     Remove,
     Value(T),
-}
-
-impl SampleSelection {
-    pub(crate) fn bind(
-        source: &Header,
-        target: &Header,
-        list: Option<&str>,
-        file: Option<&Path>,
-    ) -> Result<Self> {
-        if list.is_some() && file.is_some() {
-            return Err(invalid(
-                "annotation samples and samples file are mutually exclusive",
-            ));
-        }
-        let (exclude, requested) = match (list, file) {
-            (Some(list), None) => parse_sample_list(list)?,
-            (None, Some(path)) => {
-                let raw = path.to_string_lossy();
-                let (exclude, path) = match raw.strip_prefix('^') {
-                    Some(path) => (true, Path::new(path)),
-                    None => (false, path),
-                };
-                let content = std::fs::read_to_string(path).map_err(|error| {
-                    invalid(format!(
-                        "reading annotation samples {}: {error}",
-                        path.display()
-                    ))
-                })?;
-                let names = content
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                if names.is_empty() {
-                    return Err(invalid("annotation samples file is empty"));
-                }
-                (exclude, names)
-            }
-            (None, None) => (false, Vec::new()),
-            (Some(_), Some(_)) => unreachable!(),
-        };
-        let requested = requested.into_iter().collect::<HashSet<_>>();
-        let mut pairs = Vec::new();
-        for (source_index, name) in source.sample_names().iter().enumerate() {
-            let selected = if list.is_none() && file.is_none() {
-                true
-            } else if exclude {
-                !requested.contains(name)
-            } else {
-                requested.contains(name)
-            };
-            if !selected {
-                continue;
-            }
-            if let Some(target_index) = target.sample_names().get_index_of(name) {
-                pairs.push((source_index, target_index));
-            } else if list.is_some() || file.is_some() {
-                return Err(invalid(format!(
-                    "annotation sample {name:?} is not present in the target"
-                )));
-            }
-        }
-        if list.is_some() || file.is_some() {
-            for name in &requested {
-                if !source.sample_names().contains(name) {
-                    return Err(invalid(format!(
-                        "annotation sample {name:?} is not present in the source"
-                    )));
-                }
-            }
-        }
-        if pairs.is_empty() {
-            return Err(invalid("annotation sample selection has no target samples"));
-        }
-        Ok(Self {
-            source_to_target: pairs,
-        })
-    }
-
-    pub(crate) fn pairs(&self) -> &[(usize, usize)] {
-        &self.source_to_target
-    }
-}
-
-fn parse_sample_list(raw: &str) -> Result<(bool, Vec<String>)> {
-    let (exclude, raw) = raw
-        .strip_prefix('^')
-        .map_or((false, raw), |raw| (true, raw));
-    let names = raw
-        .split(',')
-        .map(str::trim)
-        .map(|name| {
-            if name.is_empty() {
-                Err(invalid("annotation samples contain an empty name"))
-            } else {
-                Ok(name.to_owned())
-            }
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if names.is_empty() {
-        return Err(invalid("annotation samples must not be empty"));
-    }
-    Ok((exclude, names))
 }
 
 impl Editor {
@@ -190,8 +87,28 @@ impl Editor {
                         )?);
                     }
                 }
-                (SourceField::AllFormat, Destination::AllFormat)
-                | (SourceField::Format(_), Destination::Format(_)) => {}
+                (SourceField::AllFormat, Destination::AllFormat) => {
+                    let source = source
+                        .ok_or_else(|| invalid("FORMAT transfer requires a source header"))?;
+                    for key in source.formats().keys().filter(|key| *key != "GT") {
+                        if !destinations.insert(format!("FORMAT/{key}")) {
+                            return Err(invalid(format!(
+                                "annotation destination is assigned more than once: FORMAT/{key}"
+                            )));
+                        }
+                        let transfer = Transfer {
+                            source: SourceField::Format(key.clone()),
+                            destination: Destination::Format(key.clone()),
+                            mode: transfer.mode,
+                        };
+                        transfers.push(bind_transfer(
+                            &mut prepared,
+                            Some(source),
+                            transfer,
+                            source_kind,
+                        )?);
+                    }
+                }
                 _ => {
                     let destination = destination_key(&transfer.destination);
                     if !destinations.insert(destination.clone()) {
@@ -208,10 +125,18 @@ impl Editor {
                 }
             }
         }
+        let samples = if transfers.iter().any(|bound| bound.format.is_some()) {
+            let source =
+                source.ok_or_else(|| invalid("FORMAT transfer requires a source header"))?;
+            Some(SampleSelection::bind(source, &prepared, None, None)?)
+        } else {
+            None
+        };
         *target = prepared;
         Ok(Self {
             source_kind,
             transfers,
+            samples,
         })
     }
 
@@ -527,12 +452,43 @@ fn bind_transfer(
         }
         _ => None,
     };
+    let format = match (&transfer.source, &transfer.destination) {
+        (SourceField::Format(source_key), Destination::Format(target_key)) => {
+            if (source_key == "GT") != (target_key == "GT") {
+                return Err(invalid("FORMAT/GT cannot be renamed"));
+            }
+            let source =
+                source.ok_or_else(|| invalid("FORMAT transfer requires a source header"))?;
+            let definition = source
+                .formats()
+                .get(source_key)
+                .ok_or_else(|| invalid(format!("source header has no FORMAT/{source_key}")))?
+                .clone();
+            prepare_format_definition(target, target_key, &definition)?;
+            Some(FormatPlan {
+                number: definition.number(),
+                ty: definition.ty(),
+                genotype: target_key == "GT",
+                context: format!("FORMAT/{target_key}"),
+            })
+        }
+        (_, Destination::Format(key)) => {
+            return Err(invalid(format!(
+                "FORMAT/{key} has an incompatible source field"
+            )));
+        }
+        _ => None,
+    };
     if source_kind == SourceKind::Variant
         && matches!(transfer.mode, WriteMode::Append | WriteMode::AppendMissing)
     {
         return Err(invalid("append mode requires a tabular annotation source"));
     }
-    Ok(BoundTransfer { transfer, info })
+    Ok(BoundTransfer {
+        transfer,
+        info,
+        format,
+    })
 }
 
 fn destination_key(destination: &Destination) -> String {
@@ -1059,7 +1015,10 @@ mod tests {
         header::record::value::map::info::Number,
         variant::{
             RecordBuf,
-            record_buf::info::field::{Value, value::Array},
+            record_buf::{
+                info::field::{Value, value::Array},
+                samples::sample::Value as SampleValue,
+            },
         },
     };
 
@@ -1180,6 +1139,320 @@ mod tests {
             &[(1, 0)]
         );
         assert!(SampleSelection::bind(&source, &target, Some("A"), Some(&path)).is_err());
+    }
+
+    #[test]
+    fn format_transfers_samples_by_name_and_remaps_gt_r_and_g() {
+        let definitions = "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"DP\">\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"AD\">\n\
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"PL\">\n";
+        let source_header = sample_header(definitions, &["A", "B"]);
+        let mut target_header = sample_header(definitions, &["B", "A"]);
+        let editor = bind(
+            &mut target_header,
+            &source_header,
+            "FORMAT/GT,FORMAT/DP,FORMAT/AD,FORMAT/PL",
+        );
+        let source = annotation(
+            &source_header,
+            "chr1\t1\t.\tA\tG,C\t.\tPASS\t.\tGT:DP:AD:PL\t1|2:7:10,2,3:0,1,2,3,4,5\t0/1:8:11,4,5:10,11,12,13,14,15",
+        );
+        let matched = Matched {
+            source: &source,
+            allele_map: vec![Some(0), Some(2), Some(1)],
+        };
+        let mut target = record(
+            &target_header,
+            "chr1\t1\t.\tA\tC,G\t.\tPASS\t.\tGT\t0/0\t0/0",
+        );
+
+        assert!(
+            editor
+                .apply_samples(&target_header, &matched, &mut target)
+                .unwrap()
+        );
+        let a = target.samples().get(&target_header, "A").unwrap();
+        assert_eq!(
+            a.get("GT"),
+            Some(Some(&SampleValue::Genotype("2|1".parse().unwrap())))
+        );
+        assert_eq!(a.get("DP"), Some(Some(&SampleValue::Integer(7))));
+        assert_eq!(
+            a.get("AD"),
+            Some(Some(&SampleValue::from(vec![Some(10), Some(3), Some(2)])))
+        );
+        assert_eq!(
+            a.get("PL"),
+            Some(Some(&SampleValue::from(vec![
+                Some(0),
+                Some(3),
+                Some(5),
+                Some(1),
+                Some(4),
+                Some(2),
+            ])))
+        );
+        let b = target.samples().get(&target_header, "B").unwrap();
+        assert_eq!(b.get("DP"), Some(Some(&SampleValue::Integer(8))));
+    }
+
+    #[test]
+    fn format_namespace_excludes_gt_and_initializes_new_keys() {
+        let definitions = "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"DP\">\n";
+        let source_header = sample_header(definitions, &["A"]);
+        let mut target_header = sample_header(definitions, &["A", "B"]);
+        let editor = bind(&mut target_header, &source_header, "FORMAT");
+        let source = annotation(&source_header, "chr1\t1\t.\tA\tC\t.\tPASS\t.\tGT:DP\t1/1:9");
+        let matched = Matched {
+            source: &source,
+            allele_map: vec![Some(0), Some(1)],
+        };
+        let mut target = record(&target_header, "chr1\t1\t.\tA\tC\t.\tPASS\t.\tGT\t0/0\t0/1");
+
+        editor
+            .apply_samples(&target_header, &matched, &mut target)
+            .unwrap();
+        let a = target.samples().get(&target_header, "A").unwrap();
+        assert_eq!(
+            a.get("GT"),
+            Some(Some(&SampleValue::Genotype("0/0".parse().unwrap())))
+        );
+        assert_eq!(a.get("DP"), Some(Some(&SampleValue::Integer(9))));
+        let b = target.samples().get(&target_header, "B").unwrap();
+        assert_eq!(
+            b.get("GT"),
+            Some(Some(&SampleValue::Genotype("0/1".parse().unwrap())))
+        );
+        assert_eq!(b.get("DP"), Some(None));
+    }
+
+    #[test]
+    fn format_respects_selection_and_write_modes() {
+        let definitions = "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=X,Number=1,Type=Integer,Description=\"X\">\n";
+        let source_header = sample_header(definitions, &["A", "B"]);
+        let cases = [
+            ("FORMAT/X", "7", "1", Some(Some(7))),
+            (".FORMAT/X", ".", "1", Some(None)),
+            ("+FORMAT/X", "7", "1", Some(Some(1))),
+            (".+FORMAT/X", "7", ".", Some(Some(7))),
+            ("+FORMAT/X", "7", ".", Some(Some(7))),
+        ];
+        for (columns, source_x, target_x, expected) in cases {
+            let mut target_header = sample_header(definitions, &["B", "A"]);
+            let mut editor = bind(&mut target_header, &source_header, columns);
+            editor.set_samples(
+                SampleSelection::bind(&source_header, &target_header, Some("A"), None).unwrap(),
+            );
+            let source = annotation(
+                &source_header,
+                &format!("chr1\t1\t.\tA\tC\t.\tPASS\t.\tX\t{source_x}\t8"),
+            );
+            let matched = Matched {
+                source: &source,
+                allele_map: vec![Some(0), Some(1)],
+            };
+            let mut target = record(
+                &target_header,
+                &format!("chr1\t1\t.\tA\tC\t.\tPASS\t.\tX\t2\t{target_x}"),
+            );
+
+            editor
+                .apply_samples(&target_header, &matched, &mut target)
+                .unwrap();
+            let a = target.samples().get(&target_header, "A").unwrap();
+            let actual = a.get("X").map(|value| {
+                value.map(|value| match value {
+                    SampleValue::Integer(value) => *value,
+                    _ => panic!("unexpected FORMAT/X value"),
+                })
+            });
+            assert_eq!(actual, expected, "{columns}");
+            let b = target.samples().get(&target_header, "B").unwrap();
+            assert_eq!(
+                b.get("X"),
+                Some(Some(&SampleValue::Integer(2))),
+                "{columns}"
+            );
+        }
+
+        for columns in ["=FORMAT/X", ".=FORMAT/X"] {
+            let mut target_header = sample_header(definitions, &["A"]);
+            let spec = ColumnSpec::parse(columns).unwrap();
+            let columns = BoundColumns::bind(
+                spec,
+                SourceKind::Variant,
+                &target_header,
+                Some(&source_header),
+            )
+            .unwrap();
+            assert!(Editor::bind(&mut target_header, Some(&source_header), columns).is_err());
+        }
+    }
+
+    #[test]
+    fn format_replace_existing_does_not_create_an_absent_key() {
+        let definitions = "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=X,Number=1,Type=Integer,Description=\"X\">\n";
+        let source_header = sample_header(definitions, &["A"]);
+        let mut target_header = sample_header(definitions, &["A"]);
+        let editor = bind(&mut target_header, &source_header, "-FORMAT/X");
+        let source = annotation(&source_header, "chr1\t1\t.\tA\tC\t.\tPASS\t.\tX\t7");
+        let matched = Matched {
+            source: &source,
+            allele_map: vec![Some(0), Some(1)],
+        };
+        let mut target = record(&target_header, "chr1\t1\t.\tA\tC\t.\tPASS\t.\tGT\t0/1");
+
+        assert!(
+            !editor
+                .apply_samples(&target_header, &matched, &mut target)
+                .unwrap()
+        );
+        assert!(!target.samples().keys().as_ref().contains("X"));
+    }
+
+    #[test]
+    fn format_remaps_a_r_g_for_mixed_ploidy() {
+        let definitions = "##FORMAT=<ID=AO,Number=A,Type=Integer,Description=\"AO\">\n\
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description=\"AD\">\n\
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"PL\">\n";
+        let source_header = sample_header(definitions, &["H", "D", "T"]);
+        let mut target_header = source_header.clone();
+        let editor = bind(
+            &mut target_header,
+            &source_header,
+            "FORMAT/AO,FORMAT/AD,FORMAT/PL",
+        );
+        let source = annotation(
+            &source_header,
+            "chr1\t1\t.\tA\tG,C\t.\tPASS\t.\tAO:AD:PL\t1,2:10,1,2:0,1,2\t3,4:20,3,4:0,1,2,3,4,5\t5,6:30,5,6:0,1,2,3,4,5,6,7,8,9",
+        );
+        let matched = Matched {
+            source: &source,
+            allele_map: vec![Some(0), Some(2), Some(1)],
+        };
+        let mut target = record(
+            &target_header,
+            "chr1\t1\t.\tA\tC,G\t.\tPASS\t.\tAO:AD:PL\t.:.:.\t.:.:.\t.:.:.",
+        );
+
+        editor
+            .apply_samples(&target_header, &matched, &mut target)
+            .unwrap();
+        let h = target.samples().get(&target_header, "H").unwrap();
+        assert_eq!(
+            h.get("AO"),
+            Some(Some(&SampleValue::from(vec![Some(2), Some(1)])))
+        );
+        assert_eq!(
+            h.get("AD"),
+            Some(Some(&SampleValue::from(vec![Some(10), Some(2), Some(1)])))
+        );
+        assert_eq!(
+            h.get("PL"),
+            Some(Some(&SampleValue::from(vec![Some(0), Some(2), Some(1)])))
+        );
+        let d = target.samples().get(&target_header, "D").unwrap();
+        assert_eq!(
+            d.get("PL"),
+            Some(Some(&SampleValue::from(vec![
+                Some(0),
+                Some(3),
+                Some(5),
+                Some(1),
+                Some(4),
+                Some(2)
+            ])))
+        );
+        let t = target.samples().get(&target_header, "T").unwrap();
+        assert_eq!(
+            t.get("PL"),
+            Some(Some(&SampleValue::from(vec![
+                Some(0),
+                Some(4),
+                Some(7),
+                Some(9),
+                Some(1),
+                Some(5),
+                Some(8),
+                Some(2),
+                Some(6),
+                Some(3)
+            ])))
+        );
+    }
+
+    #[test]
+    fn format_preserves_gt_separators_and_rejects_unmapped_alleles() {
+        let definitions = "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n";
+        let source_header = sample_header(definitions, &["A"]);
+        let mut target_header = source_header.clone();
+        let editor = bind(&mut target_header, &source_header, "FORMAT/GT");
+        let source = annotation(&source_header, "chr1\t1\t.\tA\tG,C\t.\tPASS\t.\tGT\t1|2/1");
+        let mut target = record(&target_header, "chr1\t1\t.\tA\tC,G\t.\tPASS\t.\tGT\t0/0");
+        let matched = Matched {
+            source: &source,
+            allele_map: vec![Some(0), Some(2), Some(1)],
+        };
+        editor
+            .apply_samples(&target_header, &matched, &mut target)
+            .unwrap();
+        assert_eq!(
+            target.samples().get(&target_header, "A").unwrap().get("GT"),
+            Some(Some(&SampleValue::Genotype("2|1/2".parse().unwrap())))
+        );
+
+        let impossible = Matched {
+            source: &source,
+            allele_map: vec![Some(0), None, Some(1)],
+        };
+        assert!(
+            editor
+                .apply_samples(&target_header, &impossible, &mut target)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn format_rejects_invalid_schema_and_cardinality() {
+        let source_header = sample_header(
+            "##FORMAT=<ID=X,Number=2,Type=Integer,Description=\"X\">\n",
+            &["A"],
+        );
+        let mut target_header = source_header.clone();
+        let editor = bind(&mut target_header, &source_header, "FORMAT/X");
+        let source = annotation(&source_header, "chr1\t1\t.\tA\tC\t.\tPASS\t.\tX\t7");
+        let matched = Matched {
+            source: &source,
+            allele_map: vec![Some(0), Some(1)],
+        };
+        let mut target = record(&target_header, "chr1\t1\t.\tA\tC\t.\tPASS\t.\tX\t1,2");
+        assert!(
+            editor
+                .apply_samples(&target_header, &matched, &mut target)
+                .is_err()
+        );
+
+        let source_header = sample_header(
+            "##FORMAT=<ID=X,Number=1,Type=Integer,Description=\"X\">\n",
+            &["A"],
+        );
+        let mut target_header = sample_header(
+            "##FORMAT=<ID=X,Number=1,Type=String,Description=\"X\">\n",
+            &["A"],
+        );
+        let spec = ColumnSpec::parse("FORMAT/X").unwrap();
+        let columns = BoundColumns::bind(
+            spec,
+            SourceKind::Variant,
+            &target_header,
+            Some(&source_header),
+        )
+        .unwrap();
+        assert!(Editor::bind(&mut target_header, Some(&source_header), columns).is_err());
     }
 
     #[test]
