@@ -19,6 +19,7 @@ use crate::filter::Logic;
 use crate::format::{
     HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer, trim_line_ending,
 };
+use crate::regions::RegionSelection;
 pub(crate) use duplicate::Policy as DuplicatePolicy;
 pub(crate) use merge::Policy as JoinPolicy;
 pub(crate) use reference::MismatchPolicy;
@@ -29,6 +30,7 @@ pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
     pub(crate) expression: Option<String>,
     pub(crate) expression_logic: Logic,
+    pub(crate) targets: Option<RegionSelection>,
     pub(crate) split_multiallelic: bool,
     pub(crate) join_multiallelic: Option<JoinPolicy>,
     pub(crate) strict_filter: bool,
@@ -53,6 +55,7 @@ pub(crate) struct Summary {
     pub(crate) split: u64,
     pub(crate) joined: u64,
     pub(crate) not_selected: u64,
+    pub(crate) target_filtered: u64,
     pub(crate) skipped: u64,
     pub(crate) atomized: u64,
     pub(crate) duplicates: u64,
@@ -181,6 +184,7 @@ fn normalize_stream(
         split: 0,
         joined: 0,
         not_selected: 0,
+        target_filtered: 0,
         skipped: 0,
         atomized: 0,
         duplicates: 0,
@@ -203,6 +207,25 @@ fn normalize_stream(
             .map(usize::from)
             .ok_or_else(|| invalid(number, "variant position is missing"))?;
         validate_input_order(number, reference, position, &mut input_position, &mut seen)?;
+
+        if options
+            .targets
+            .as_ref()
+            .is_some_and(|targets| !targets.keeps(&record))
+        {
+            summary.target_filtered += 1;
+            let threshold = position.saturating_sub(options.site_window);
+            flush_ready(
+                &mut pending,
+                header,
+                writer,
+                &output_options,
+                (reference, threshold),
+                &mut output_state,
+                &mut summary,
+            )?;
+            continue;
+        }
 
         let selected = expression
             .map(|expression| {
@@ -544,6 +567,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
             reference: Some(reference),
             expression: None,
             expression_logic: Logic::Include,
+            targets: None,
             split_multiallelic: false,
             join_multiallelic: None,
             strict_filter: false,
@@ -589,6 +613,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
             reference: Some(reference),
             expression: None,
             expression_logic: Logic::Include,
+            targets: None,
             split_multiallelic: false,
             join_multiallelic: None,
             strict_filter: false,

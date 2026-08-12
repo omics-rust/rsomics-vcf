@@ -175,6 +175,54 @@ chr1\t20\tunchanged\tA\tC,G\t.\tPASS\tDP=5\n",
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn streaming_target_modes_match_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tAT\tA,G\t.\tPASS\t.\n\
+chr1\t20\tb\tA\tC,G\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    for (mode, oracle_mode) in [("pos", "0"), ("record", "1"), ("variant", "2")] {
+        for targets in ["chr1:11", "^chr1:11"] {
+            let ours = body(run(Command::new(PathBuf::from(env!(
+                "CARGO_BIN_EXE_rsomics-vcf"
+            )))
+            .args([
+                "norm",
+                "--split-multiallelic",
+                "--targets",
+                targets,
+                "--targets-overlap",
+                mode,
+                input.to_str().unwrap(),
+            ])));
+            let oracle = body(run(Command::new("bcftools").args([
+                "norm",
+                "--no-version",
+                "-m",
+                "-any",
+                "--targets",
+                targets,
+                "--targets-overlap",
+                oracle_mode,
+                input.to_str().unwrap(),
+            ])));
+            assert_eq!(ours, oracle, "{mode} {targets}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn typed_biallelic_join_any_matches_bcftools_1_24() {
     let version = run(Command::new("bcftools").arg("--version"));
     assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));

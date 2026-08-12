@@ -5,7 +5,7 @@ use clap::{Args, ValueEnum};
 use rsomics_common::{Result, RsomicsError, write_atomic};
 
 use crate::cli::CommandOutput;
-use crate::commands::variant::OutputType;
+use crate::commands::variant::{OutputType, Overlap, read_targets};
 use crate::filter::Logic;
 use crate::norm::{self, MismatchPolicy, Options};
 
@@ -160,6 +160,23 @@ pub(crate) struct Arguments {
     #[arg(short = 'i', long, value_name = "EXPR")]
     include: Option<String>,
 
+    /// Streaming target regions, separated by commas; prefix with ^ to exclude
+    #[arg(
+        short = 't',
+        long,
+        value_name = "REGIONS",
+        conflicts_with = "targets_file"
+    )]
+    targets: Option<String>,
+
+    /// File containing one streaming target region per line; prefix the path with ^ to exclude
+    #[arg(short = 'T', long, value_name = "FILE")]
+    targets_file: Option<PathBuf>,
+
+    /// Target overlap rule
+    #[arg(long, value_name = "MODE", default_value = "pos")]
+    targets_overlap: Overlap,
+
     /// Write normalized variants to this file instead of standard output
     #[arg(
         short = 'o',
@@ -210,6 +227,11 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         reference: arguments.reference,
         expression,
         expression_logic,
+        targets: read_targets(
+            arguments.targets,
+            arguments.targets_file.as_deref(),
+            arguments.targets_overlap.into(),
+        )?,
         split_multiallelic: arguments.split_multiallelic,
         join_multiallelic: arguments.join_multiallelic.map(Into::into),
         strict_filter: arguments.strict_filter,

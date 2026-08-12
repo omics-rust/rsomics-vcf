@@ -165,6 +165,54 @@ chr1\t20\tunchanged\tA\tC,G\t.\tPASS\tDP=5\n",
 }
 
 #[test]
+fn streaming_targets_limit_norm_input_and_support_exclusion() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.vcf");
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t10\ta\tAT\tA,G\t.\tPASS\t.\n\
+chr1\t20\tb\tA\tC,G\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    for (targets, expected_id) in [("chr1:11", "a"), ("^chr1:11", "b")] {
+        let output = Command::new(binary())
+            .args([
+                "--json",
+                "norm",
+                "--split-multiallelic",
+                "--targets",
+                targets,
+                "--targets-overlap",
+                "record",
+                "--output",
+                directory.path().join("output.vcf").to_str().unwrap(),
+                input.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(summary["result"]["summary"]["read"], 2);
+        assert_eq!(summary["result"]["summary"]["target_filtered"], 1);
+        let output = fs::read_to_string(directory.path().join("output.vcf")).unwrap();
+        let ids = output
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| line.split('\t').nth(2).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [expected_id, expected_id]);
+    }
+}
+
+#[test]
 fn invalid_norm_expression_fails_before_writing_output() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.vcf");
