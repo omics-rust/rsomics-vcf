@@ -10,15 +10,25 @@ pub(crate) enum Outcome {
     Changed,
     Unchanged,
     Unsupported,
+    Skipped,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum MismatchPolicy {
+    #[default]
+    Exit,
+    Warn,
+    Skip,
 }
 
 pub(crate) struct ReferenceNormalizer {
     reference: IndexedFasta,
+    policy: MismatchPolicy,
 }
 
 impl ReferenceNormalizer {
-    pub(crate) fn open(path: &Path) -> Result<Self> {
-        IndexedFasta::open(path).map(|reference| Self { reference })
+    pub(crate) fn open(path: &Path, policy: MismatchPolicy) -> Result<Self> {
+        IndexedFasta::open(path).map(|reference| Self { reference, policy })
     }
 
     pub(crate) fn normalize(&mut self, record: &mut RecordBuf) -> Result<Outcome> {
@@ -30,8 +40,8 @@ impl ReferenceNormalizer {
         for alternate in record.alternate_bases().as_ref() {
             alleles.push(alternate.as_bytes().to_ascii_uppercase());
         }
-        if alleles.len() == 1 || alleles.iter().any(|allele| !is_sequence(allele)) {
-            return Ok(Outcome::Unsupported);
+        if !is_sequence(&alleles[0]) {
+            return self.mismatch(record, "REF contains a non-ACGTN base");
         }
 
         let original_position = usize::from(position) - 1;
@@ -39,19 +49,31 @@ impl ReferenceNormalizer {
         let reference_end = position
             .checked_add(alleles[0].len())
             .ok_or_else(|| invalid(record, "REF range overflows"))?;
-        let expected = self.reference.fetch(
-            record.reference_sequence_name().as_bytes(),
-            position..reference_end,
-        )?;
-        if !alleles[0].eq_ignore_ascii_case(expected) {
-            return Err(invalid(
+        let mut expected = self
+            .reference
+            .fetch(
+                record.reference_sequence_name().as_bytes(),
+                position..reference_end,
+            )?
+            .to_vec();
+        for base in &mut expected {
+            *base = iupac_first(*base).to_ascii_uppercase();
+        }
+        if alleles[0] != expected {
+            return self.mismatch(
                 record,
                 &format!(
                     "REF {} does not match indexed reference {}",
                     String::from_utf8_lossy(&alleles[0]),
-                    String::from_utf8_lossy(expected)
+                    String::from_utf8_lossy(&expected)
                 ),
-            ));
+            );
+        }
+        if alleles.len() == 1 || alleles.iter().skip(1).any(|allele| !is_ordinary(allele)) {
+            return Ok(Outcome::Unsupported);
+        }
+        if alleles.iter().skip(1).any(|allele| !is_sequence(allele)) {
+            return self.mismatch(record, "ALT contains a non-ACGTN base");
         }
 
         loop {
@@ -74,8 +96,8 @@ impl ReferenceNormalizer {
                 let previous = self.reference.fetch(
                     record.reference_sequence_name().as_bytes(),
                     position - 1..position,
-                )?[0]
-                    .to_ascii_uppercase();
+                )?[0];
+                let previous = iupac_first(previous).to_ascii_uppercase();
                 for allele in &mut alleles {
                     allele.insert(0, previous);
                 }
@@ -123,6 +145,21 @@ impl ReferenceNormalizer {
         );
         Ok(Outcome::Changed)
     }
+
+    fn mismatch(&self, record: &RecordBuf, message: &str) -> Result<Outcome> {
+        match self.policy {
+            MismatchPolicy::Exit => Err(invalid(record, message)),
+            MismatchPolicy::Warn => {
+                eprintln!(
+                    "REF_MISMATCH\t{}\t{}\t{message}",
+                    record.reference_sequence_name(),
+                    record.variant_start().map_or(0, usize::from)
+                );
+                Ok(Outcome::Unsupported)
+            }
+            MismatchPolicy::Skip => Ok(Outcome::Skipped),
+        }
+    }
 }
 
 fn is_sequence(allele: &[u8]) -> bool {
@@ -130,6 +167,24 @@ fn is_sequence(allele: &[u8]) -> bool {
         && allele
             .iter()
             .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T' | b'N'))
+}
+
+fn is_ordinary(allele: &[u8]) -> bool {
+    !allele.is_empty()
+        && allele.first() != Some(&b'<')
+        && allele != b"."
+        && allele != b"*"
+        && !allele.contains(&b'[')
+        && !allele.contains(&b']')
+}
+
+fn iupac_first(base: u8) -> u8 {
+    match base.to_ascii_uppercase() {
+        b'R' | b'W' | b'M' | b'D' | b'H' | b'V' => b'A',
+        b'Y' | b'S' | b'B' => b'C',
+        b'K' => b'G',
+        base => base,
+    }
 }
 
 fn invalid(record: &RecordBuf, message: &str) -> RsomicsError {
@@ -164,7 +219,7 @@ mod tests {
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
             .parse()
             .unwrap();
-        let mut normalizer = ReferenceNormalizer::open(&path).unwrap();
+        let mut normalizer = ReferenceNormalizer::open(&path, MismatchPolicy::Exit).unwrap();
 
         for (line, position, reference, alternate) in [
             (b"chr1\t4\t.\tA\tAA\t.\tPASS\t.".as_slice(), 1, "A", "AA"),
@@ -190,7 +245,7 @@ mod tests {
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
             .parse()
             .unwrap();
-        let mut normalizer = ReferenceNormalizer::open(&path).unwrap();
+        let mut normalizer = ReferenceNormalizer::open(&path, MismatchPolicy::Exit).unwrap();
 
         let mut mismatch = record(&header, b"chr1\t2\t.\tT\tA\t.\tPASS\t.");
         let error = normalizer.normalize(&mut mismatch).unwrap_err().to_string();
@@ -201,5 +256,32 @@ mod tests {
         let error = normalizer.normalize(&mut outside).unwrap_err().to_string();
         assert!(error.contains("chr1"), "{error}");
         assert!(error.contains("length 4"), "{error}");
+    }
+
+    #[test]
+    fn reference_iupac_and_mismatch_policies_are_explicit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reference.fa");
+        fs::write(&path, b">chr1\nARYK\n").unwrap();
+        fs::write(path.with_extension("fa.fai"), b"chr1\t4\t6\t4\t5\n").unwrap();
+        let header: vcf::Header = "##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=4>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            .parse()
+            .unwrap();
+
+        let mut exit = ReferenceNormalizer::open(&path, MismatchPolicy::Exit).unwrap();
+        let mut iupac_reference = record(&header, b"chr1\t2\t.\tA\tC\t.\tPASS\t.");
+        assert_eq!(
+            exit.normalize(&mut iupac_reference).unwrap(),
+            Outcome::Unchanged
+        );
+
+        let mut mismatch = record(&header, b"chr1\t3\t.\tA\tC\t.\tPASS\t.");
+        assert!(exit.normalize(&mut mismatch).is_err());
+        let mut warn = ReferenceNormalizer::open(&path, MismatchPolicy::Warn).unwrap();
+        assert_eq!(warn.normalize(&mut mismatch).unwrap(), Outcome::Unsupported);
+        let mut skip = ReferenceNormalizer::open(&path, MismatchPolicy::Skip).unwrap();
+        assert_eq!(skip.normalize(&mut mismatch).unwrap(), Outcome::Skipped);
     }
 }

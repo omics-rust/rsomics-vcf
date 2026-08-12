@@ -1,12 +1,29 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use rsomics_common::{Result, RsomicsError, write_atomic};
 
 use crate::cli::CommandOutput;
 use crate::commands::variant::OutputType;
-use crate::norm::{self, Options};
+use crate::norm::{self, MismatchPolicy, Options};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CheckReference {
+    Exit,
+    Warn,
+    Skip,
+}
+
+impl From<CheckReference> for MismatchPolicy {
+    fn from(value: CheckReference) -> Self {
+        match value {
+            CheckReference::Exit => Self::Exit,
+            CheckReference::Warn => Self::Warn,
+            CheckReference::Skip => Self::Skip,
+        }
+    }
+}
 
 #[derive(Debug, Args)]
 #[command(after_help = "\
@@ -30,6 +47,10 @@ pub(crate) struct Arguments {
     /// Split multiallelic records into biallelic records
     #[arg(short = 'm', long)]
     split_multiallelic: bool,
+
+    /// REF mismatch behavior: exit, warn, or skip
+    #[arg(long, value_name = "MODE", requires = "reference")]
+    check_ref: Option<CheckReference>,
 
     /// Write normalized variants to this file instead of standard output
     #[arg(
@@ -65,6 +86,7 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
     let options = Options {
         reference: arguments.reference,
         split_multiallelic: arguments.split_multiallelic,
+        mismatch_policy: arguments.check_ref.unwrap_or(CheckReference::Exit).into(),
         output_format: arguments.output_type.into(),
         site_window: arguments.site_window,
     };

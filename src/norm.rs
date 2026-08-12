@@ -11,12 +11,14 @@ use rsomics_common::{Result, RsomicsError};
 use serde::Serialize;
 
 use crate::format::{HeaderMode, OutputFormat, Reader, RecordScratch, VariantWriter, Writer};
+pub(crate) use reference::MismatchPolicy;
 use reference::{Outcome, ReferenceNormalizer};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Options {
     pub(crate) reference: Option<PathBuf>,
     pub(crate) split_multiallelic: bool,
+    pub(crate) mismatch_policy: MismatchPolicy,
     pub(crate) output_format: OutputFormat,
     pub(crate) site_window: usize,
 }
@@ -29,6 +31,7 @@ pub(crate) struct Summary {
     pub(crate) unchanged: u64,
     pub(crate) unsupported: u64,
     pub(crate) split: u64,
+    pub(crate) skipped: u64,
     pub(crate) output_format: OutputFormat,
 }
 
@@ -97,7 +100,7 @@ fn normalize_stream(
     let mut normalizer = options
         .reference
         .as_deref()
-        .map(ReferenceNormalizer::open)
+        .map(|path| ReferenceNormalizer::open(path, options.mismatch_policy))
         .transpose()?;
     let mut scratch = RecordScratch::default();
     let mut pending = BinaryHeap::new();
@@ -111,6 +114,7 @@ fn normalize_stream(
         unchanged: 0,
         unsupported: 0,
         split: 0,
+        skipped: 0,
         output_format: options.output_format,
     };
 
@@ -145,6 +149,10 @@ fn normalize_stream(
                     Outcome::Changed => summary.changed += 1,
                     Outcome::Unchanged => summary.unchanged += 1,
                     Outcome::Unsupported => summary.unsupported += 1,
+                    Outcome::Skipped => {
+                        summary.skipped += 1;
+                        continue;
+                    }
                 }
             }
             let normalized_position = record
@@ -301,6 +309,7 @@ chr1\t9\t.\tTAC\tTAG\t.\tPASS\t.\n",
         let options = Options {
             reference: Some(reference),
             split_multiallelic: false,
+            mismatch_policy: MismatchPolicy::Exit,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
         };
@@ -335,6 +344,7 @@ chr1\t4\t.\tA\tAA\t.\tPASS\t.\n",
         let options = Options {
             reference: Some(reference),
             split_multiallelic: false,
+            mismatch_policy: MismatchPolicy::Exit,
             output_format: OutputFormat::Vcf,
             site_window: 1000,
         };

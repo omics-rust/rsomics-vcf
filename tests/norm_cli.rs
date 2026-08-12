@@ -120,3 +120,62 @@ chr1\t10\t.\tA\tC,G\t.\tPASS\tAF=0.25,0.5\tGT\t1/2\n",
         "{output}"
     );
 }
+
+#[test]
+fn reference_mismatch_warn_and_skip_are_observable() {
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fa");
+    let input = directory.path().join("input.vcf");
+    fs::write(&reference, b">chr1\nACGT\n").unwrap();
+    fs::write(reference.with_extension("fa.fai"), b"chr1\t4\t6\t4\t5\n").unwrap();
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=4>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t2\t.\tT\tA\t.\tPASS\t.\n\
+chr1\t3\t.\tG\tA\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    let warn = Command::new(binary())
+        .args([
+            "norm",
+            "--fasta-ref",
+            reference.to_str().unwrap(),
+            "--check-ref",
+            "warn",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(warn.status.success());
+    assert!(String::from_utf8_lossy(&warn.stderr).contains("REF_MISMATCH\tchr1\t2"));
+    assert_eq!(
+        String::from_utf8_lossy(&warn.stdout)
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .count(),
+        2
+    );
+
+    let skip = Command::new(binary())
+        .args([
+            "norm",
+            "--fasta-ref",
+            reference.to_str().unwrap(),
+            "--check-ref",
+            "skip",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(skip.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&skip.stdout)
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .count(),
+        1
+    );
+}
