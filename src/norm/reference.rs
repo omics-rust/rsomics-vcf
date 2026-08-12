@@ -1,9 +1,16 @@
+mod fix;
+
 use std::path::Path;
 
 use noodles_core::Position;
 use noodles_vcf::variant::{RecordBuf, record_buf::AlternateBases};
 use rsomics_common::{Result, RsomicsError};
 use rsomics_seqio::IndexedFasta;
+
+use fix::{
+    clean_iupac, fix_reference, remove_reference_alternates, resolve_unknown_reference_bases,
+    set_alleles,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Outcome {
@@ -19,6 +26,7 @@ pub(crate) enum MismatchPolicy {
     Exit,
     Warn,
     Skip,
+    Fix,
 }
 
 pub(crate) struct ReferenceNormalizer {
@@ -36,12 +44,20 @@ impl ReferenceNormalizer {
             return Ok(Outcome::Unsupported);
         };
         let mut alleles = Vec::with_capacity(record.alternate_bases().as_ref().len() + 1);
-        alleles.push(record.reference_bases().as_bytes().to_ascii_uppercase());
-        for alternate in record.alternate_bases().as_ref() {
-            alleles.push(alternate.as_bytes().to_ascii_uppercase());
+        let mut reference = record.reference_bases().as_bytes().to_vec();
+        let mut cleaned = self.policy == MismatchPolicy::Fix && clean_iupac(&mut reference);
+        if self.policy != MismatchPolicy::Fix {
+            reference.make_ascii_uppercase();
         }
-        if !is_sequence(&alleles[0]) {
-            return self.mismatch(record, "REF contains a non-ACGTN base");
+        alleles.push(reference);
+        for alternate in record.alternate_bases().as_ref() {
+            let mut alternate = alternate.as_bytes().to_vec();
+            if self.policy == MismatchPolicy::Fix {
+                cleaned |= clean_iupac(&mut alternate);
+            } else {
+                alternate.make_ascii_uppercase();
+            }
+            alleles.push(alternate);
         }
 
         let original_position = usize::from(position) - 1;
@@ -59,7 +75,28 @@ impl ReferenceNormalizer {
         for base in &mut expected {
             *base = iupac_first(*base).to_ascii_uppercase();
         }
-        if alleles[0] != expected {
+        if self.policy == MismatchPolicy::Fix {
+            if alleles[0] == b"." {
+                alleles[0].clone_from(&expected);
+                cleaned = true;
+            } else {
+                cleaned |= resolve_unknown_reference_bases(&mut alleles, &expected);
+            }
+        }
+        if !is_sequence(&alleles[0]) {
+            return self.mismatch(record, "REF contains a non-ACGTN base");
+        }
+        let reference_matches = alleles[0].eq_ignore_ascii_case(&expected);
+        let mut fixed = if !reference_matches && self.policy == MismatchPolicy::Fix {
+            fix_reference(record, &mut alleles, &expected)?;
+            true
+        } else {
+            if cleaned {
+                set_alleles(record, &alleles);
+            }
+            cleaned
+        };
+        if !reference_matches && self.policy != MismatchPolicy::Fix {
             return self.mismatch(
                 record,
                 &format!(
@@ -69,8 +106,16 @@ impl ReferenceNormalizer {
                 ),
             );
         }
+        if self.policy == MismatchPolicy::Fix && remove_reference_alternates(record, &mut alleles)?
+        {
+            fixed = true;
+        }
         if alleles.len() == 1 || alleles.iter().skip(1).any(|allele| !is_ordinary(allele)) {
-            return Ok(Outcome::Unsupported);
+            return Ok(if fixed {
+                Outcome::Changed
+            } else {
+                Outcome::Unsupported
+            });
         }
         if alleles.iter().skip(1).any(|allele| !is_sequence(allele)) {
             return self.mismatch(record, "ALT contains a non-ACGTN base");
@@ -120,7 +165,8 @@ impl ReferenceNormalizer {
             position += 1;
         }
 
-        let changed = position != original_position
+        let changed = fixed
+            || position != original_position
             || alleles[0] != record.reference_bases().as_bytes()
             || alleles[1..].iter().map(Vec::as_slice).ne(record
                 .alternate_bases()
@@ -158,6 +204,7 @@ impl ReferenceNormalizer {
                 Ok(Outcome::Unsupported)
             }
             MismatchPolicy::Skip => Ok(Outcome::Skipped),
+            MismatchPolicy::Fix => Err(invalid(record, message)),
         }
     }
 }
@@ -166,7 +213,7 @@ fn is_sequence(allele: &[u8]) -> bool {
     !allele.is_empty()
         && allele
             .iter()
-            .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T' | b'N'))
+            .all(|base| matches!(base.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T' | b'N'))
 }
 
 fn is_ordinary(allele: &[u8]) -> bool {

@@ -2,8 +2,11 @@
 
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+
+use noodles_bgzf as bgzf;
 
 fn run(command: &mut Command) -> Output {
     let output = command.output().unwrap();
@@ -255,6 +258,327 @@ chr1\t3\t.\tG\tA\t.\tPASS\t.\n",
         ])));
         assert_eq!(ours, oracle, "{ours_policy}");
     }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn reference_fix_matches_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fa");
+    let input = directory.path().join("input.vcf");
+    fs::write(&reference, b">chr1\nACGTACGT\n").unwrap();
+    fs::write(reference.with_extension("fa.fai"), b"chr1\t8\t6\t8\t9\n").unwrap();
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=8>\n\
+##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Allele count\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\tS4\n\
+chr1\t2\tswap\tT\tA,C,G\t.\tPASS\tAC=4,5,6\tGT\t0/2\t2|0\t./2\t0\n\
+chr1\t3\tset-snp\tT\tA,C\t.\tPASS\tAC=7,8\tGT\t0/1\t1|2\t./0\t2\n\
+chr1\t5\tset-mnv\tAT\tTT,AG,<DEL>\t.\tPASS\tAC=1,2,3\tGT\t0/1\t1|2\t./0\t3\n",
+    )
+    .unwrap();
+
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--check-ref",
+        "s",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(
+        oracle,
+        b"chr1\t2\tswap\tC\tA,T,G\t.\tPASS\tAC=4,3,6\tGT\t2/0\t0|2\t./0\t2\n\
+chr1\t3\tset-snp\tG\tA,C\t.\tPASS\tAC=7,8\tGT\t0/1\t1|2\t./0\t2\n\
+chr1\t5\tset-mnv\tAC\tTC,AG,<DEL>\t.\tPASS\tAC=1,2,3\tGT\t0/1\t1|2\t./0\t3\n"
+    );
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--check-ref",
+        "fix",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+
+    for output_type in ["v", "z", "b", "u"] {
+        let ours = directory.path().join(format!("ours.{output_type}"));
+        let oracle = directory.path().join(format!("oracle.{output_type}"));
+        run(
+            Command::new(PathBuf::from(env!("CARGO_BIN_EXE_rsomics-vcf"))).args([
+                "norm",
+                "--fasta-ref",
+                reference.to_str().unwrap(),
+                "--check-ref",
+                "fix",
+                "-O",
+                output_type,
+                "-o",
+                ours.to_str().unwrap(),
+                input.to_str().unwrap(),
+            ]),
+        );
+        run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "--fasta-ref",
+            reference.to_str().unwrap(),
+            "--check-ref",
+            "s",
+            "-O",
+            output_type,
+            "-o",
+            oracle.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ]));
+        let ours = body(run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-Ov",
+            ours.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-Ov",
+            oracle.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{output_type}");
+    }
+
+    for input_type in ["v", "z", "b", "u"] {
+        let encoded = directory.path().join(format!("input.{input_type}"));
+        run(Command::new("bcftools").args([
+            "view",
+            "--no-version",
+            "-O",
+            input_type,
+            "-o",
+            encoded.to_str().unwrap(),
+            input.to_str().unwrap(),
+        ]));
+        let ours = body(run(Command::new(PathBuf::from(env!(
+            "CARGO_BIN_EXE_rsomics-vcf"
+        )))
+        .args([
+            "norm",
+            "--fasta-ref",
+            reference.to_str().unwrap(),
+            "--check-ref",
+            "fix",
+            encoded.to_str().unwrap(),
+        ])));
+        let oracle = body(run(Command::new("bcftools").args([
+            "norm",
+            "--no-version",
+            "--fasta-ref",
+            reference.to_str().unwrap(),
+            "--check-ref",
+            "s",
+            encoded.to_str().unwrap(),
+        ])));
+        assert_eq!(ours, oracle, "{input_type}");
+    }
+
+    let compressed_reference = directory.path().join("reference.fa.gz");
+    let mut writer = bgzf::io::Writer::new(fs::File::create(&compressed_reference).unwrap());
+    writer.write_all(b">chr1\nACGTACGT\n").unwrap();
+    writer.try_finish().unwrap();
+    fs::write(
+        compressed_reference.with_extension("gz.fai"),
+        b"chr1\t8\t6\t8\t9\n",
+    )
+    .unwrap();
+    fs::write(
+        compressed_reference.with_extension("gz.gzi"),
+        0_u64.to_le_bytes(),
+    )
+    .unwrap();
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--fasta-ref",
+        compressed_reference.to_str().unwrap(),
+        "--check-ref",
+        "fix",
+        input.to_str().unwrap(),
+    ])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--fasta-ref",
+        compressed_reference.to_str().unwrap(),
+        "--check-ref",
+        "s",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn reference_fix_resolves_missing_and_ambiguous_bases_like_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fa");
+    let input = directory.path().join("input.vcf");
+    fs::write(&reference, b">chr1\nACGTACGT\n").unwrap();
+    fs::write(reference.with_extension("fa.fai"), b"chr1\t8\t6\t8\t9\n").unwrap();
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=8>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t1\tmissing\t.\tG\t.\tPASS\t.\n\
+chr1\t2\tiupac\tY\tR\t.\tPASS\t.\n\
+chr1\t3\tunknown\tGN\tNC\t.\tPASS\t.\n\
+chr1\t4\tlower\tt\tr\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--check-ref",
+        "s",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(
+        oracle,
+        b"chr1\t1\tmissing\tA\tG\t.\tPASS\t.\n\
+chr1\t2\tiupac\tC\tA\t.\tPASS\t.\n\
+chr1\t3\tunknown\tGT\tNC\t.\tPASS\t.\n\
+chr1\t4\tlower\tt\ta\t.\tPASS\t.\n"
+    );
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--check-ref",
+        "fix",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn reference_fix_split_atomization_and_origin_trace_match_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fa");
+    let input = directory.path().join("input.vcf");
+    fs::write(&reference, b">chr1\nACGT\n").unwrap();
+    fs::write(reference.with_extension("fa.fai"), b"chr1\t4\t6\t4\t5\n").unwrap();
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=4>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+chr1\t2\t.\tT\tA,C\t.\tPASS\t.\n",
+    )
+    .unwrap();
+
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--check-ref",
+        "fix",
+        "--split-multiallelic",
+        "--atomize",
+        "--old-rec-tag",
+        "ORIG",
+        input.to_str().unwrap(),
+    ])));
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--check-ref",
+        "s",
+        "-m",
+        "-any",
+        "--atomize",
+        "--old-rec-tag",
+        "ORIG",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn reference_fix_removes_alternates_that_become_the_reference_like_bcftools_1_24() {
+    let version = run(Command::new("bcftools").arg("--version"));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("bcftools 1.24\n"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fa");
+    let input = directory.path().join("input.vcf");
+    fs::write(&reference, b">chr1\nACGT\n").unwrap();
+    fs::write(reference.with_extension("fa.fai"), b"chr1\t4\t6\t4\t5\n").unwrap();
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=4>\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\tS3\tS4\n\
+chr1\t2\t.\tT\tC,C,A\t.\tPASS\t.\tGT\t0/2\t2/1\t1/1\t3/0\n",
+    )
+    .unwrap();
+
+    let oracle = body(run(Command::new("bcftools").args([
+        "norm",
+        "--no-version",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--check-ref",
+        "s",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(
+        oracle,
+        b"chr1\t2\t.\tC\tT,A\t.\tPASS\t.\tGT\t1/0\t0/0\t0/0\t2/1\n"
+    );
+    let ours = body(run(Command::new(PathBuf::from(env!(
+        "CARGO_BIN_EXE_rsomics-vcf"
+    )))
+    .args([
+        "norm",
+        "--fasta-ref",
+        reference.to_str().unwrap(),
+        "--check-ref",
+        "fix",
+        input.to_str().unwrap(),
+    ])));
+    assert_eq!(ours, oracle);
 }
 
 #[test]

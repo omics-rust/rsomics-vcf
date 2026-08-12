@@ -13,6 +13,7 @@ enum CheckReference {
     Exit,
     Warn,
     Skip,
+    Fix,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +68,7 @@ impl From<CheckReference> for MismatchPolicy {
             CheckReference::Exit => Self::Exit,
             CheckReference::Warn => Self::Warn,
             CheckReference::Skip => Self::Skip,
+            CheckReference::Fix => Self::Fix,
         }
     }
 }
@@ -118,7 +120,7 @@ pub(crate) struct Arguments {
     #[arg(long, value_name = "TAG", requires = "split_multiallelic")]
     keep_sum: Option<String>,
 
-    /// REF mismatch behavior: exit, warn, or skip
+    /// REF mismatch behavior: exit, warn, skip, or fix
     #[arg(long, value_name = "MODE", requires = "reference")]
     check_ref: Option<CheckReference>,
 

@@ -248,6 +248,46 @@ chr1\t3\t.\tG\tA\t.\tPASS\t.\n",
 }
 
 #[test]
+fn reference_fix_swaps_alleles_genotypes_and_allele_count() {
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fa");
+    let input = directory.path().join("input.vcf");
+    fs::write(&reference, b">chr1\nACGT\n").unwrap();
+    fs::write(reference.with_extension("fa.fai"), b"chr1\t4\t6\t4\t5\n").unwrap();
+    fs::write(
+        &input,
+        b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=4>\n\
+##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Allele count\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t2\t.\tT\tA,C\t.\tPASS\tAC=4,5\tGT\t0/2\t1|0\n",
+    )
+    .unwrap();
+
+    let output = Command::new(binary())
+        .args([
+            "norm",
+            "--fasta-ref",
+            reference.to_str().unwrap(),
+            "--check-ref",
+            "fix",
+            input.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("chr1\t2\t.\tC\tA,T\t.\tPASS\tAC=4,2\tGT\t2/0\t1|2\n")
+    );
+}
+
+#[test]
 fn public_command_atomizes_mnvs_without_a_reference() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.vcf");
