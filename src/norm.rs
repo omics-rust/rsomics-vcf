@@ -1,5 +1,5 @@
 mod atomize;
-mod cardinality;
+pub(crate) mod cardinality;
 mod duplicate;
 mod gff;
 mod merge;

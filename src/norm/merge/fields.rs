@@ -16,7 +16,7 @@ use noodles_vcf::{
 };
 use rsomics_common::{Result, RsomicsError};
 
-use super::super::cardinality::{combinations, infer_ploidy};
+use super::super::cardinality::{combinations, genotype_index, infer_ploidy, visit_genotypes};
 
 pub(super) fn merge_info(
     header: &Header,
@@ -476,7 +476,7 @@ fn field_mapping(number: Number, alleles: &[usize], ploidy: usize) -> Result<Vec
         Number::ReferenceAlternate => Ok(alleles.iter().copied().enumerate().collect()),
         Number::Genotype => {
             let mut mapping = Vec::new();
-            enumerate_genotypes(alleles.len(), ploidy, 0, &mut Vec::new(), &mut |genotype| {
+            visit_genotypes(alleles.len(), ploidy, |genotype| {
                 let source = genotype_index(genotype).unwrap();
                 let mut mapped: Vec<_> = genotype.iter().map(|&allele| alleles[allele]).collect();
                 mapped.sort_unstable();
@@ -485,33 +485,6 @@ fn field_mapping(number: Number, alleles: &[usize], ploidy: usize) -> Result<Vec
             Ok(mapping)
         }
     }
-}
-
-fn enumerate_genotypes(
-    alleles: usize,
-    ploidy: usize,
-    minimum: usize,
-    genotype: &mut Vec<usize>,
-    visit: &mut impl FnMut(&[usize]),
-) {
-    if genotype.len() == ploidy {
-        visit(genotype);
-        return;
-    }
-    for allele in minimum..alleles {
-        genotype.push(allele);
-        enumerate_genotypes(alleles, ploidy, allele, genotype, visit);
-        genotype.pop();
-    }
-}
-
-fn genotype_index(genotype: &[usize]) -> Option<usize> {
-    genotype
-        .iter()
-        .enumerate()
-        .try_fold(0usize, |index, (i, allele)| {
-            combinations(allele + i, i + 1).and_then(|offset| index.checked_add(offset))
-        })
 }
 
 fn merge_genotypes(
