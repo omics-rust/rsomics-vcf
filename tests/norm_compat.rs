@@ -23,7 +23,7 @@ fn body(output: Output) -> Vec<u8> {
         .stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.starts_with(b"#") && !line.is_empty())
-        .flat_map(|line| line.iter().copied().chain([b'\n']))
+        .flat_map(|line| line.iter().copied().chain(*b"\n"))
         .collect()
 }
 
