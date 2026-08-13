@@ -16,7 +16,11 @@ fn oracle() -> PathBuf {
 fn companion(name: &str) -> PathBuf {
     let oracle = oracle();
     let parent = oracle.parent().unwrap_or(Path::new("."));
-    for path in [parent.join(name), parent.join("htslib").join(name)] {
+    for path in [
+        parent.join(name),
+        parent.join("htslib-1.24").join(name),
+        parent.join("htslib").join(name),
+    ] {
         if path.is_file() {
             return path;
         }
