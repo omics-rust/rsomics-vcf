@@ -134,6 +134,9 @@ mod tests {
         assert!(help.contains("--header-lines <FILE>"), "{help}");
         assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
         assert!(help.contains("--threads <INT>"), "{help}");
+        assert!(help.contains("Column plans:"), "{help}");
+        assert!(help.contains("DEST:=SOURCE"), "{help}");
+        assert!(help.contains(".+ writes missing source values"), "{help}");
     }
 
     #[test]

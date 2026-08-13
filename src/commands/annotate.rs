@@ -47,6 +47,13 @@ Output types:
   b  BGZF-compressed BCF
   u  uncompressed BCF
 
+Column plans:
+  VCF and BCF sources infer their coordinate and allele fields.
+  Tabular sources require CHROM,POS or CHROM,FROM,TO before transfer columns.
+  Transfer ID, QUAL, FILTER, INFO/TAG, or FORMAT/TAG; DEST:=SOURCE renames.
+  Prefixes: . writes missing source values; + fills missing targets; .+ writes missing source values
+  while filling missing targets; = appends; .= appends missing values; - updates existing targets.
+
 Examples:
   rsomics-vcf annotate calls.vcf.gz -a db.vcf.gz -c ID,INFO/AF
   rsomics-vcf annotate calls.bcf -a depths.vcf.gz -c FORMAT/DP -s S1,S2 -O z -o annotated.vcf.gz
