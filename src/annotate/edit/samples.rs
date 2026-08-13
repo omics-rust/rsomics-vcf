@@ -153,12 +153,7 @@ impl Editor {
         matched: &Matched<'_>,
         target: &mut RecordBuf,
     ) -> Result<bool> {
-        let format_transfers = self
-            .transfers
-            .iter()
-            .filter(|bound| bound.format.is_some())
-            .collect::<Vec<_>>();
-        if format_transfers.is_empty() {
+        if !self.transfers.iter().any(|bound| bound.format.is_some()) {
             return Ok(false);
         }
         let selection = self
@@ -170,8 +165,7 @@ impl Editor {
                 "FORMAT transfer requires a variant annotation source",
             ));
         };
-        let original = target.samples().clone();
-        let (mut keys, mut values) = original.clone().into();
+        let (mut keys, mut values) = target.samples().clone().into();
         if values.len() != header.sample_names().len() {
             return Err(invalid("target sample count does not match its header"));
         }
@@ -180,7 +174,7 @@ impl Editor {
             row.resize(key_count, None);
         }
 
-        for bound in format_transfers {
+        for bound in self.transfers.iter().filter(|bound| bound.format.is_some()) {
             let plan = bound.format.as_ref().expect("FORMAT transfer has a schema");
             let SourceField::Format(source_key) = &bound.transfer.source else {
                 unreachable!("FORMAT transfer has a FORMAT source");
@@ -261,7 +255,7 @@ impl Editor {
         }
 
         let updated = Samples::new(keys, values);
-        if updated == original {
+        if &updated == target.samples() {
             Ok(false)
         } else {
             *target.samples_mut() = updated;
