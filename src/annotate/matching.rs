@@ -46,6 +46,28 @@ impl AnnotationSource {
         logic: PairLogic,
         fractions: OverlapFractions,
     ) -> Result<Option<Matched<'_>>> {
+        Ok(self
+            .matches_inner(target, logic, fractions, 1)?
+            .into_iter()
+            .next())
+    }
+
+    pub(crate) fn matches(
+        &mut self,
+        target: &RecordBuf,
+        logic: PairLogic,
+        fractions: OverlapFractions,
+    ) -> Result<Vec<Matched<'_>>> {
+        self.matches_inner(target, logic, fractions, usize::MAX)
+    }
+
+    fn matches_inner(
+        &mut self,
+        target: &RecordBuf,
+        logic: PairLogic,
+        fractions: OverlapFractions,
+        limit: usize,
+    ) -> Result<Vec<Matched<'_>>> {
         fractions.validate()?;
         let target_contig = *self
             .contigs
@@ -82,6 +104,7 @@ impl AnnotationSource {
         }
 
         let constraints = Constraints::from_columns(self.columns());
+        let mut matches = Vec::new();
         for source in &self.active {
             if !overlaps(source, target_contig, target_start, target_end)
                 || !fractions.keeps(source, target_start, target_end)
@@ -95,10 +118,13 @@ impl AnnotationSource {
                 }
             };
             if let Some(allele_map) = allele_map {
-                return Ok(Some(Matched { source, allele_map }));
+                matches.push(Matched { source, allele_map });
+                if matches.len() == limit {
+                    break;
+                }
             }
         }
-        Ok(None)
+        Ok(matches)
     }
 
     pub(crate) fn active_len(&self) -> usize {

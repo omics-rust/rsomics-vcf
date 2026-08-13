@@ -278,21 +278,29 @@ impl Processor {
         let source = &mut self.source;
         let mut changed;
         let matched = if let Some(source) = source {
-            let current =
+            let current = if source.editor.requires_all_matches() {
                 source
                     .source
-                    .first_match(&record, source.pair_logic, source.min_overlap)?;
+                    .matches(&record, source.pair_logic, source.min_overlap)?
+            } else {
+                source
+                    .source
+                    .first_match(&record, source.pair_logic, source.min_overlap)?
+                    .into_iter()
+                    .collect()
+            };
             changed = header.apply(&mut record)?;
             if let Some(id) = id {
                 changed |= id.apply(output_header, &mut record)?;
             }
-            if let Some(current) = current {
+            if !current.is_empty() {
+                changed |=
+                    source
+                        .editor
+                        .apply_info_matches(output_header, &current, &mut record)?;
                 changed |= source
                     .editor
-                    .apply_info(output_header, &current, &mut record)?;
-                changed |= source
-                    .editor
-                    .apply_samples(output_header, &current, &mut record)?;
+                    .apply_samples(output_header, &current[0], &mut record)?;
                 true
             } else {
                 false
@@ -398,7 +406,7 @@ fn prepare_mark(header: &mut Header, tag: &str) -> Result<()> {
             Map::<Info>::new(
                 info::Number::Count(0),
                 info::Type::Flag,
-                "Site membership in the annotation source",
+                format!("Sites listed in {tag}"),
             ),
         );
     }

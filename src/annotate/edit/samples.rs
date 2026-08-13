@@ -17,7 +17,7 @@ use rsomics_common::Result;
 use super::{Editor, State, choose, invalid, remap_array};
 use crate::{
     annotate::{
-        columns::{Destination, SourceField, SourceKind, WriteMode},
+        columns::{Destination, SourceField, WriteMode},
         matching::Matched,
         source::Payload,
     },
@@ -175,6 +175,10 @@ impl Editor {
         if values.len() != header.sample_names().len() {
             return Err(invalid("target sample count does not match its header"));
         }
+        let key_count = keys.as_ref().len();
+        for row in &mut values {
+            row.resize(key_count, None);
+        }
 
         for bound in format_transfers {
             let plan = bound.format.as_ref().expect("FORMAT transfer has a schema");
@@ -240,12 +244,15 @@ impl Editor {
                 } else {
                     State::Absent
                 };
-                let next = choose(
+                let next = if matches!(
                     bound.transfer.mode,
-                    source_value,
-                    current.clone(),
-                    SourceKind::Variant,
-                )?;
+                    WriteMode::Replace | WriteMode::ReplaceExisting
+                ) && matches!(source_value, State::Missing)
+                {
+                    State::Missing
+                } else {
+                    choose(bound.transfer.mode, source_value, current.clone())?
+                };
                 row[target_key_index] = match next {
                     State::Value(value) => Some(value),
                     State::Absent | State::Missing | State::Remove => None,

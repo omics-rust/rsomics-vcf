@@ -140,19 +140,54 @@ impl Editor {
         })
     }
 
+    pub(crate) fn requires_all_matches(&self) -> bool {
+        self.source_kind == SourceKind::Tabular
+            && self.transfers.iter().any(|bound| {
+                bound
+                    .info
+                    .as_ref()
+                    .is_some_and(|plan| matches!(plan.number, Number::A | Number::R))
+            })
+    }
+
     pub(crate) fn apply_info(
         &self,
         header: &Header,
         matched: &Matched<'_>,
         target: &mut RecordBuf,
     ) -> Result<bool> {
+        self.apply_info_matches(header, std::slice::from_ref(matched), target)
+    }
+
+    pub(crate) fn apply_info_matches(
+        &self,
+        header: &Header,
+        matches: &[Matched<'_>],
+        target: &mut RecordBuf,
+    ) -> Result<bool> {
+        let Some(first) = matches.first() else {
+            return Ok(false);
+        };
         let mut changed = false;
         for bound in &self.transfers {
             changed |= match &bound.transfer.destination {
-                Destination::Id => self.apply_ids(header, bound, matched, target)?,
-                Destination::Qual => self.apply_qual(bound, matched, target)?,
-                Destination::Filter => self.apply_filters(header, bound, matched, target)?,
-                Destination::Info(key) => self.apply_one_info(bound, key, matched, target)?,
+                Destination::Id => self.apply_ids(header, bound, first, target)?,
+                Destination::Qual => self.apply_qual(bound, first, target)?,
+                Destination::Filter => self.apply_filters(header, bound, first, target)?,
+                Destination::Info(key)
+                    if self.source_kind == SourceKind::Tabular
+                        && bound
+                            .info
+                            .as_ref()
+                            .is_some_and(|plan| matches!(plan.number, Number::A | Number::R)) =>
+                {
+                    let mut field_changed = false;
+                    for matched in matches {
+                        field_changed |= self.apply_one_info(bound, key, matched, target)?;
+                    }
+                    field_changed
+                }
+                Destination::Info(key) => self.apply_one_info(bound, key, first, target)?,
                 Destination::Format(_) | Destination::AllInfo | Destination::AllFormat => false,
             };
         }
@@ -185,12 +220,7 @@ impl Editor {
         } else {
             State::Value(target.ids().clone())
         };
-        let next = choose(
-            bound.transfer.mode,
-            source,
-            current.clone(),
-            self.source_kind,
-        )?;
+        let next = choose(bound.transfer.mode, source, current.clone())?;
         if next == current {
             return Ok(false);
         }
@@ -218,12 +248,7 @@ impl Editor {
             },
         };
         let current = target.quality_score().map_or(State::Missing, State::Value);
-        let next = choose(
-            bound.transfer.mode,
-            source,
-            current.clone(),
-            self.source_kind,
-        )?;
+        let next = choose(bound.transfer.mode, source, current.clone())?;
         if next == current {
             return Ok(false);
         }
@@ -260,12 +285,7 @@ impl Editor {
         } else {
             State::Value(target.filters().clone())
         };
-        let next = choose(
-            bound.transfer.mode,
-            source,
-            current.clone(),
-            self.source_kind,
-        )?;
+        let next = choose(bound.transfer.mode, source, current.clone())?;
         if next == current {
             return Ok(false);
         }
@@ -302,45 +322,58 @@ impl Editor {
                 _ => State::Absent,
             },
         };
-        let source = match source {
-            State::Value(value) => {
-                validate_info(&value, plan, matched.source.alternates.len() + 1)?;
-                State::Value(remap_info(
-                    plan.number,
-                    value,
-                    matched,
-                    target.alternate_bases().as_ref().len() + 1,
-                    &plan.context,
-                )?)
-            }
-            state => state,
-        };
         let current = match target.info().get(key) {
             None => State::Absent,
             Some(None) => State::Missing,
             Some(Some(value)) => State::Value(value.clone()),
         };
-        let next = if matches!(
-            bound.transfer.mode,
-            WriteMode::Append | WriteMode::AppendMissing
-        ) {
-            append_state(
+        let target_alleles = target.alternate_bases().as_ref().len() + 1;
+        let allele_transfer = matches!(plan.number, Number::A | Number::R)
+            && !matched.allele_map.is_empty()
+            && !matches!(
+                bound.transfer.mode,
+                WriteMode::Append | WriteMode::AppendMissing
+            );
+        let next = if allele_transfer {
+            allele_state(
                 bound.transfer.mode,
                 source,
                 current.clone(),
-                plan.ty,
-                &plan.context,
+                plan,
+                matched,
+                target_alleles,
             )?
         } else {
-            choose(
+            let source = match source {
+                State::Value(value) => {
+                    validate_info(&value, plan, matched.source.alternates.len() + 1)?;
+                    State::Value(remap_info(
+                        plan.number,
+                        value,
+                        matched,
+                        target_alleles,
+                        &plan.context,
+                    )?)
+                }
+                state => state,
+            };
+            if matches!(
                 bound.transfer.mode,
-                source,
-                current.clone(),
-                self.source_kind,
-            )?
+                WriteMode::Append | WriteMode::AppendMissing
+            ) {
+                append_state(
+                    bound.transfer.mode,
+                    source,
+                    current.clone(),
+                    plan.ty,
+                    &plan.context,
+                )?
+            } else {
+                choose(bound.transfer.mode, source, current.clone())?
+            }
         };
         if let State::Value(value) = &next {
-            validate_info(value, plan, target.alternate_bases().as_ref().len() + 1)?;
+            validate_info(value, plan, target_alleles)?;
         }
         if next == current {
             return Ok(false);
@@ -545,18 +578,12 @@ fn source_bytes<'a>(
         })
 }
 
-fn choose<T: Clone>(
-    mode: WriteMode,
-    source: State<T>,
-    target: State<T>,
-    source_kind: SourceKind,
-) -> Result<State<T>> {
+fn choose<T: Clone>(mode: WriteMode, source: State<T>, target: State<T>) -> Result<State<T>> {
     if matches!(source, State::Remove) {
         return Ok(State::Absent);
     }
     let concrete = matches!(source, State::Value(_));
-    let present = !matches!(source, State::Absent)
-        && (!matches!(source, State::Missing) || source_kind == SourceKind::Variant);
+    let present = !matches!(source, State::Absent | State::Missing);
     let output = match mode {
         WriteMode::Replace if present => source,
         WriteMode::ReplaceMissing if !matches!(source, State::Absent) => source,
@@ -884,6 +911,149 @@ fn remap_info(
             "{context} allele-indexed value must be an array"
         ))),
     }
+}
+
+fn allele_state(
+    mode: WriteMode,
+    source: State<Value>,
+    current: State<Value>,
+    plan: &InfoPlan,
+    matched: &Matched<'_>,
+    target_alleles: usize,
+) -> Result<State<Value>> {
+    let source_alleles = matched.source.alternates.len() + 1;
+    let source = match source {
+        State::Value(value) => {
+            validate_info(&value, plan, source_alleles)?;
+            value
+        }
+        State::Missing if matches!(mode, WriteMode::ReplaceMissing | WriteMode::AddMissing) => {
+            let count = if plan.number == Number::AlternateBases {
+                source_alleles - 1
+            } else {
+                source_alleles
+            };
+            missing_info_array(plan.ty, count)?
+        }
+        state => return choose(mode, state, current),
+    };
+    if let State::Value(value) = &current {
+        validate_info(value, plan, target_alleles)?;
+    }
+    let target_present = !matches!(current, State::Absent);
+
+    macro_rules! merge {
+        ($scalar:ident, $array:ident, $source:expr) => {{
+            let source = match $source {
+                Value::$scalar(value) => vec![Some(value)],
+                Value::Array(Array::$array(values)) => values,
+                _ => {
+                    return Err(invalid(format!(
+                        "{} has an incompatible type",
+                        plan.context
+                    )));
+                }
+            };
+            let mut target = match current.clone() {
+                State::Value(Value::$scalar(value)) => vec![Some(value)],
+                State::Value(Value::Array(Array::$array(values))) => values,
+                State::Value(_) => {
+                    return Err(invalid(format!(
+                        "{} has an incompatible type",
+                        plan.context
+                    )));
+                }
+                State::Absent | State::Missing => {
+                    vec![None; target_alleles - usize::from(plan.number == Number::AlternateBases)]
+                }
+                State::Remove => unreachable!("remove is resolved by the write policy"),
+            };
+            if merge_allele_values(
+                plan.number,
+                source,
+                &mut target,
+                &matched.allele_map,
+                mode,
+                target_present,
+                &plan.context,
+            )? {
+                State::Value(Value::Array(Array::$array(target)))
+            } else {
+                current
+            }
+        }};
+    }
+
+    Ok(match source {
+        value @ (Value::Integer(_) | Value::Array(Array::Integer(_))) => {
+            merge!(Integer, Integer, value)
+        }
+        value @ (Value::Float(_) | Value::Array(Array::Float(_))) => {
+            merge!(Float, Float, value)
+        }
+        value @ (Value::Character(_) | Value::Array(Array::Character(_))) => {
+            merge!(Character, Character, value)
+        }
+        value @ (Value::String(_) | Value::Array(Array::String(_))) => {
+            merge!(String, String, value)
+        }
+        Value::Flag => return Err(invalid(format!("{} cannot be a flag", plan.context))),
+    })
+}
+
+fn missing_info_array(ty: Type, count: usize) -> Result<Value> {
+    Ok(match ty {
+        Type::Integer => Value::Array(Array::Integer(vec![None; count])),
+        Type::Float => Value::Array(Array::Float(vec![None; count])),
+        Type::Character => Value::Array(Array::Character(vec![None; count])),
+        Type::String => Value::Array(Array::String(vec![None; count])),
+        Type::Flag => return Err(invalid("allele-indexed INFO fields cannot be flags")),
+    })
+}
+
+fn merge_allele_values<T: Clone + PartialEq>(
+    number: Number,
+    source: Vec<Option<T>>,
+    target: &mut [Option<T>],
+    mapping: &[Option<usize>],
+    mode: WriteMode,
+    target_present: bool,
+    context: &str,
+) -> Result<bool> {
+    let offset = usize::from(number == Number::AlternateBases);
+    let expected = mapping.len() - offset;
+    if source.len() != expected {
+        return Err(invalid(format!(
+            "{context} has {} values, expected {expected}",
+            source.len()
+        )));
+    }
+    let mut changed = false;
+    for (source_allele, target_allele) in mapping.iter().enumerate().skip(offset) {
+        let Some(target_allele) = target_allele else {
+            continue;
+        };
+        let target_index = target_allele
+            .checked_sub(offset)
+            .ok_or_else(|| invalid(format!("{context} alternate allele maps to the reference")))?;
+        let source = &source[source_allele - offset];
+        let target = target
+            .get_mut(target_index)
+            .ok_or_else(|| invalid(format!("{context} allele mapping exceeds the target")))?;
+        let replace = match mode {
+            WriteMode::Replace => source.is_some(),
+            WriteMode::ReplaceMissing => true,
+            WriteMode::Add => target.is_none() && source.is_some(),
+            WriteMode::AddMissing => target.is_none(),
+            WriteMode::ReplaceExisting => target_present,
+            WriteMode::Append | WriteMode::AppendMissing => unreachable!(),
+        };
+        if replace && target != source {
+            *target = source.clone();
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 fn remap_array<T: Clone + PartialEq>(
@@ -1235,6 +1405,7 @@ mod tests {
         let source_header = sample_header(definitions, &["A", "B"]);
         let cases = [
             ("FORMAT/X", "7", "1", Some(Some(7))),
+            ("FORMAT/X", ".", "1", Some(None)),
             (".FORMAT/X", ".", "1", Some(None)),
             ("+FORMAT/X", "7", "1", Some(Some(1))),
             (".+FORMAT/X", "7", ".", Some(Some(7))),
@@ -1634,9 +1805,17 @@ mod tests {
             .apply_info(&target_header, &matched, &mut target)
             .unwrap();
         assert_eq!(target.info().get("A"), Some(Some(&Value::Integer(7))));
-        assert_eq!(target.info().get("B"), Some(None));
+        assert_eq!(target.info().get("B"), None);
         assert!(target_header.infos().contains_key("A"));
         assert!(target_header.infos().contains_key("B"));
+
+        let mut target_header = header("");
+        let editor = bind(&mut target_header, &source_header, ".INFO");
+        let mut target = record(&target_header, "chr1\t1\t.\tA\tC\t.\tPASS\t.");
+        editor
+            .apply_info(&target_header, &matched, &mut target)
+            .unwrap();
+        assert_eq!(target.info().get("B"), Some(None));
     }
 
     #[test]
@@ -1735,6 +1914,38 @@ mod tests {
                 .unwrap();
             assert_eq!(target.info().get("X"), expected, "{columns}");
         }
+    }
+
+    #[test]
+    fn tabular_matches_accumulate_allele_indexed_values() {
+        let mut target_header = header("##INFO=<ID=IA,Number=A,Type=Integer,Description=\"A\">\n");
+        let (_directory, mut source) = table(
+            &target_header,
+            "chr1\t1\tA\tC\t10\nchr1\t1\tA\tG\t20\n",
+            "CHROM,POS,REF,ALT,INFO/IA",
+        );
+        let editor = Editor::bind(&mut target_header, None, source.columns().clone()).unwrap();
+        let first = source.read_record().unwrap().unwrap();
+        let second = source.read_record().unwrap().unwrap();
+        let matches = [
+            Matched {
+                source: &first,
+                allele_map: vec![Some(0), Some(1)],
+            },
+            Matched {
+                source: &second,
+                allele_map: vec![Some(0), Some(2)],
+            },
+        ];
+        let mut target = record(&target_header, "chr1\t1\t.\tA\tC,G\t.\tPASS\tIA=1,2");
+
+        editor
+            .apply_info_matches(&target_header, &matches, &mut target)
+            .unwrap();
+        assert_eq!(
+            target.info().get("IA"),
+            Some(Some(&integer_array(&[Some(10), Some(20)])))
+        );
     }
 
     #[test]
