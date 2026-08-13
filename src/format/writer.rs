@@ -5,11 +5,15 @@ use noodles_bcf as bcf;
 use noodles_bgzf as bgzf;
 use noodles_vcf::{
     self as vcf,
-    header::record::value::map::info::Type,
+    header::record::value::map::{format::Type as FormatType, info::Type},
     variant::{
         RecordBuf,
         io::Write as _,
-        record_buf::info::field::{Value, value::Array},
+        record_buf::{
+            Samples,
+            info::field::{Value, value::Array},
+            samples::sample::Value as SampleValue,
+        },
     },
 };
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -330,18 +334,46 @@ fn map_write_error(error: std::io::Error, context: &str) -> RsomicsError {
 }
 
 fn bcf_record<'a>(header: &vcf::Header, record: &'a RecordBuf) -> Result<Cow<'a, RecordBuf>> {
-    let missing = record
+    let missing_info = record
         .info()
         .as_ref()
         .iter()
         .filter_map(|(key, value)| value.is_none().then_some(key.clone()))
         .collect::<Vec<_>>();
-    if missing.is_empty() {
+    let genotype_index = record.samples().keys().as_ref().get_index_of("GT");
+    let missing_genotypes = genotype_index.is_some_and(|index| {
+        record
+            .samples()
+            .values()
+            .any(|sample| sample.values().get(index).is_none_or(Option::is_none))
+    });
+    let missing_text = record
+        .samples()
+        .keys()
+        .as_ref()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, key)| {
+            let ty = header.formats().get(key)?.ty();
+            if matches!(ty, FormatType::String | FormatType::Character)
+                && key != "GT"
+                && record
+                    .samples()
+                    .values()
+                    .all(|sample| sample.values().get(index).is_none_or(Option::is_none))
+            {
+                Some((index, ty))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if missing_info.is_empty() && !missing_genotypes && missing_text.is_empty() {
         return Ok(Cow::Borrowed(record));
     }
 
     let mut record = record.clone();
-    for key in missing {
+    for key in missing_info {
         let definition = header.infos().get(&key).ok_or_else(|| {
             RsomicsError::InvalidInput(format!("INFO/{key} has no header definition"))
         })?;
@@ -357,6 +389,27 @@ fn bcf_record<'a>(header: &vcf::Header, record: &'a RecordBuf) -> Result<Cow<'a,
             }
         };
         record.info_mut().insert(key, Some(value));
+    }
+    if genotype_index.is_some() || !missing_text.is_empty() {
+        let (keys, mut values) = record.samples().clone().into();
+        for row in &mut values {
+            row.resize(keys.as_ref().len(), None);
+            if let Some(index) = genotype_index
+                && row[index].is_none()
+            {
+                row[index] = Some(SampleValue::Genotype(
+                    ".".parse().expect("missing genotype is valid"),
+                ));
+            }
+            for &(index, ty) in &missing_text {
+                row[index] = Some(match ty {
+                    FormatType::Character => SampleValue::Character('.'),
+                    FormatType::String => SampleValue::String(".".to_owned()),
+                    _ => unreachable!("missing text field has a text type"),
+                });
+            }
+        }
+        *record.samples_mut() = Samples::new(keys, values);
     }
     Ok(Cow::Owned(record))
 }
@@ -448,6 +501,38 @@ mod tests {
             let header = reader.read_header().unwrap();
             let record = reader.record_bufs(&header).next().unwrap().unwrap();
             assert_eq!(record.info().as_ref().len(), 4, "parallel={parallel}");
+        }
+    }
+
+    #[test]
+    fn bcf_encodes_missing_genotypes_and_text_fields() {
+        let raw = "##fileformat=VCFv4.3\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=C,Number=1,Type=Character,Description=\"C\">\n\
+##FORMAT=<ID=S,Number=1,Type=String,Description=\"S\">\n\
+##contig=<ID=chr1,length=1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tA\tB\n";
+        let header: vcf::Header = raw.parse().unwrap();
+        let record = vcf::Record::try_from(
+            b"chr1\t1\t.\tA\tC\t.\tPASS\t.\tGT:C:S\t0/1:.:.\t.:.:.".as_slice(),
+        )
+        .unwrap();
+        let record = vcf::variant::RecordBuf::try_from_variant_record(&header, &record).unwrap();
+
+        let output = SharedOutput::default();
+        let bytes = output.0.clone();
+        let mut writer = Writer::new(output, OutputFormat::Bcf);
+        writer.write_header(&header, HeaderMode::Full).unwrap();
+        writer.write_record(&header, &record, 1).unwrap();
+        writer.finish().unwrap();
+
+        let compressed = bytes.lock().unwrap().clone();
+        let mut reader = bcf::io::Reader::new(Cursor::new(compressed));
+        let header = reader.read_header().unwrap();
+        let record = reader.record_bufs(&header).next().unwrap().unwrap();
+        let sample = record.samples().get(&header, "B").unwrap();
+        for key in ["GT", "C", "S"] {
+            assert!(sample.get(key).is_some(), "{key}");
         }
     }
 
