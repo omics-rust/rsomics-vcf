@@ -29,7 +29,7 @@ resolve_binary() {
 companion() {
     local parent
     parent="$(dirname "$1")"
-    for candidate in "$parent/$2" "$parent/htslib/$2"; do
+    for candidate in "$parent/$2" "$parent/htslib-1.24/$2" "$parent/htslib/$2"; do
         if [[ -x "$candidate" ]]; then
             printf '%s\n' "$candidate"
             return
@@ -91,6 +91,7 @@ run_benchmark() {
     [[ $# -eq 6 ]] || usage
     binary="$(resolve_binary "$1")"
     bcftools="$(resolve_binary "$2")"
+    rustc="$(resolve_binary "${RSOMICS_RUSTC:-rustc}")"
     target="$(realpath "$3")"
     annotations="$(realpath "$4")"
     columns="$5"
@@ -170,7 +171,9 @@ run_benchmark() {
         uname -a
         sysctl -n hw.model
         sysctl -n machdep.cpu.brand_string
+        printf 'physical_memory_bytes=%s\n' "$(sysctl -n hw.memsize)"
         sw_vers
+        "$rustc" --version --verbose
         "$binary" --version
         "$bcftools" --version | sed -n '1,2p'
         printf 'git_head=%s\n' "$(git -C "$repository" rev-parse HEAD)"
@@ -183,7 +186,7 @@ run_benchmark() {
         printf 'rsomics_command='; printf '%q ' "${ours_command[@]}"; printf '\n'
         printf 'bcftools_command='; printf '%q ' "${oracle_command[@]}"; printf '\n'
         wc -c "$target" "$annotations" "$ours_output" "$oracle_output"
-        shasum -a 256 "$binary" "$bcftools" "$target" "$annotations" \
+        shasum -a 256 "$binary" "$bcftools" "$rustc" "$target" "$annotations" \
             "$ours_output" "$oracle_output" "$result_directory/rsomics.canonical.vcf" \
             "$result_directory/bcftools.canonical.vcf" "$raw_results" "$summary"
     } > "$result_directory/provenance.txt"
