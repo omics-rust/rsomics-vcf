@@ -42,6 +42,15 @@ Experimental merge logic, dynamic source-column expressions, forced recovery,
 automatic indexing, and provenance stamping are not accepted as placeholder
 options.
 
+The annotation release benchmark verifies complete normalized output against
+bcftools 1.24 before timing. On an Apple M2 with three warmups and ten
+alternating measured pairs, the 2,000,000-record interval join used 4.8 MB
+median peak RSS versus 124.4 MB for bcftools while taking 3.895 versus 3.735
+seconds. The 300,000-record, eight-sample typed transfer used 5.1 versus 8.3 MB
+RSS but took 8.495 versus 1.560 seconds. This is a bounded-memory advantage,
+not a general throughput claim; the complete distributions and fingerprints
+are in `PERFORMANCE.md`.
+
 `head` writes VCF text, preserves header order, normalizes the standard PASS
 definition, removes BCF-internal `IDX` fields, and renders typed records
 compatibly with bcftools 1.24. Unlike bcftools, malformed records and invalid
