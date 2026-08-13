@@ -1,8 +1,17 @@
+use std::borrow::Cow;
 use std::io::{BufWriter, Write};
 
 use noodles_bcf as bcf;
 use noodles_bgzf as bgzf;
-use noodles_vcf::{self as vcf, variant::io::Write as _};
+use noodles_vcf::{
+    self as vcf,
+    header::record::value::map::info::Type,
+    variant::{
+        RecordBuf,
+        io::Write as _,
+        record_buf::info::field::{Value, value::Array},
+    },
+};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use rsomics_common::{Result, RsomicsError};
 
@@ -86,13 +95,19 @@ where
         record: &vcf::variant::RecordBuf,
         number: u64,
     ) -> Result<()> {
-        match self {
+        let result = match self {
             Self::Vcf(writer) => writer.write_variant_record(header, record),
             Self::VcfBgzf(writer) => writer.write_variant_record(header, record),
-            Self::Bcf(writer) => writer.write_variant_record(header, record),
-            Self::BcfRaw(writer) => writer.write_variant_record(header, record),
-        }
-        .map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
+            Self::Bcf(writer) => {
+                let record = bcf_record(header, record)?;
+                writer.write_variant_record(header, record.as_ref())
+            }
+            Self::BcfRaw(writer) => {
+                let record = bcf_record(header, record)?;
+                writer.write_variant_record(header, record.as_ref())
+            }
+        };
+        result.map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
     }
 
     pub(crate) fn write_vcf_record(&mut self, record: &[u8], number: u64) -> Result<()> {
@@ -208,11 +223,14 @@ where
         record: &vcf::variant::RecordBuf,
         number: u64,
     ) -> Result<()> {
-        match self {
+        let result = match self {
             Self::VcfBgzf(writer) => writer.write_variant_record(header, record),
-            Self::Bcf(writer) => writer.write_variant_record(header, record),
-        }
-        .map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
+            Self::Bcf(writer) => {
+                let record = bcf_record(header, record)?;
+                writer.write_variant_record(header, record.as_ref())
+            }
+        };
+        result.map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
     }
 
     fn supports_vcf_records(&self) -> bool {
@@ -311,6 +329,38 @@ fn map_write_error(error: std::io::Error, context: &str) -> RsomicsError {
     }
 }
 
+fn bcf_record<'a>(header: &vcf::Header, record: &'a RecordBuf) -> Result<Cow<'a, RecordBuf>> {
+    let missing = record
+        .info()
+        .as_ref()
+        .iter()
+        .filter_map(|(key, value)| value.is_none().then_some(key.clone()))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(Cow::Borrowed(record));
+    }
+
+    let mut record = record.clone();
+    for key in missing {
+        let definition = header.infos().get(&key).ok_or_else(|| {
+            RsomicsError::InvalidInput(format!("INFO/{key} has no header definition"))
+        })?;
+        let value = match definition.ty() {
+            Type::Integer => Value::Array(Array::Integer(vec![None])),
+            Type::Float => Value::Array(Array::Float(vec![None])),
+            Type::Character => Value::Array(Array::Character(vec![None])),
+            Type::String => Value::Array(Array::String(vec![None])),
+            Type::Flag => {
+                return Err(RsomicsError::InvalidInput(format!(
+                    "INFO/{key} flag has an explicit missing value"
+                )));
+            }
+        };
+        record.info_mut().insert(key, Some(value));
+    }
+    Ok(Cow::Owned(record))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read};
@@ -363,6 +413,42 @@ mod tests {
         let compressed = bytes.lock().unwrap().clone();
         let mut reader = bcf::io::Reader::new(Cursor::new(compressed));
         reader.read_header().unwrap();
+    }
+
+    #[test]
+    fn bcf_encodes_explicitly_missing_info_values() {
+        let raw = "##fileformat=VCFv4.3\n\
+##INFO=<ID=I,Number=1,Type=Integer,Description=\"I\">\n\
+##INFO=<ID=F,Number=1,Type=Float,Description=\"F\">\n\
+##INFO=<ID=C,Number=1,Type=Character,Description=\"C\">\n\
+##INFO=<ID=S,Number=1,Type=String,Description=\"S\">\n\
+##contig=<ID=chr1,length=1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n";
+        let header: vcf::Header = raw.parse().unwrap();
+        let record = vcf::Record::try_from(b"chr1\t1\t.\tA\tC\t.\tPASS\t.".as_slice()).unwrap();
+        let mut record =
+            vcf::variant::RecordBuf::try_from_variant_record(&header, &record).unwrap();
+        for key in ["I", "F", "C", "S"] {
+            record.info_mut().insert(key.to_owned(), None);
+        }
+        for parallel in [false, true] {
+            let output = SharedOutput::default();
+            let bytes = output.0.clone();
+            let mut writer: Box<dyn VariantWriter> = if parallel {
+                Box::new(ParallelWriter::new(output, OutputFormat::Bcf, 1).unwrap())
+            } else {
+                Box::new(Writer::new(output, OutputFormat::Bcf))
+            };
+            writer.write_header(&header, HeaderMode::Full).unwrap();
+            writer.write_record(&header, &record, 1).unwrap();
+            writer.finish().unwrap();
+
+            let compressed = bytes.lock().unwrap().clone();
+            let mut reader = bcf::io::Reader::new(Cursor::new(compressed));
+            let header = reader.read_header().unwrap();
+            let record = reader.record_bufs(&header).next().unwrap().unwrap();
+            assert_eq!(record.info().as_ref().len(), 4, "parallel={parallel}");
+        }
     }
 
     #[test]
