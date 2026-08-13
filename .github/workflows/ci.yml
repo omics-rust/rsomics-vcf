@@ -108,7 +108,8 @@ jobs:
       - name: Test compatibility oracle
         if: matrix.target == 'linux-x86_64'
         run: |
-          cargo test --locked --test annotate_compat -- --ignored --test-threads=1
+          RSOMICS_BCFTOOLS="$(command -v bcftools)" \
+            cargo test --locked --test annotate_compat -- --ignored --test-threads=1
           cargo test --locked --test compat -- --ignored
           cargo test --locked --test filter_compat -- --ignored
           cargo test --locked --test index_compat -- --ignored
