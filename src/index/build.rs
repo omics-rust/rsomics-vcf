@@ -22,15 +22,12 @@ use noodles_vcf;
 use rayon::ThreadPoolBuilder;
 use rsomics_common::{Context, Result, RsomicsError, write_atomic};
 
+use crate::format::bgzf::EOF_BLOCK;
+
 use super::bcf_record;
 use super::csi::{LinearIndex, apply_loffsets, settings};
 use super::vcf::{parse_interval, trim_line_ending};
 use super::{BuildOptions, BuildSummary, IndexKind, VariantFormat};
-
-const BGZF_EOF: [u8; 28] = [
-    0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02, 0x00,
-    0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
 
 type Source = Box<dyn Read + Send>;
 
@@ -118,18 +115,18 @@ fn open_source(input: &Path) -> Result<Source> {
         .metadata()
         .rs_with_context(|| format!("reading variant metadata {}", input.display()))?
         .len();
-    if length < BGZF_EOF.len() as u64 {
+    if length < EOF_BLOCK.len() as u64 {
         return Err(RsomicsError::InvalidInput(format!(
             "{}: input is not a complete BGZF stream",
             input.display()
         )));
     }
-    file.seek(SeekFrom::End(-(BGZF_EOF.len() as i64)))
+    file.seek(SeekFrom::End(-(EOF_BLOCK.len() as i64)))
         .rs_with_context(|| format!("checking BGZF terminator {}", input.display()))?;
-    let mut eof = [0; BGZF_EOF.len()];
+    let mut eof = [0; EOF_BLOCK.len()];
     file.read_exact(&mut eof)
         .rs_with_context(|| format!("checking BGZF terminator {}", input.display()))?;
-    if eof != BGZF_EOF {
+    if eof != EOF_BLOCK {
         return Err(RsomicsError::InvalidInput(format!(
             "{}: BGZF end-of-file marker is missing",
             input.display()
