@@ -1,0 +1,9 @@
+##fileformat=VCFv4.3
+##source=replacement
+##FILTER=<ID=q10,Description="Quality below 10">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total depth">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sample depth">
+##contig=<ID=chr1,length=101,assembly=replacement>
+##contig=<ID=chr2,length=202>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1	S2

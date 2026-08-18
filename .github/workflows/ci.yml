@@ -116,5 +116,7 @@ jobs:
           cargo test --locked --test index_compat -- --ignored
           cargo test --locked --test norm_compat -- --ignored
           cargo test --locked --test query -- --ignored
+          RSOMICS_BCFTOOLS="$(command -v bcftools)" \
+            cargo test --locked --test reheader_compat -- --ignored --test-threads=1
           cargo test --locked --test validate_compat -- --ignored
           cargo test --locked --test view_compat -- --ignored
