@@ -1,6 +1,6 @@
 # Performance
 
-## `reheader` 0.4 release gate
+## `reheader` 0.5 release gate
 
 The release benchmark compares complete plain VCF output and decompressed BGZF
 VCF output against bcftools 1.24 before timing. It also requires the BGZF

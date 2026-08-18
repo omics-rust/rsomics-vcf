@@ -16,6 +16,8 @@ The current implementation provides:
   deduplicate variants while remapping typed INFO, FORMAT, and genotype fields.
 - `query`: project typed site, INFO, FORMAT, and genotype fields from the same
   input formats with sample selection and transactional named output.
+- `reheader`: replace headers, synchronize contigs from a FASTA index, or
+  rename samples without changing the variant payload.
 - `validate`: validate VCF 4.1–4.5 or BCF 2.2 structure, schema, typed values,
   cardinality, genotypes, and cross-field invariants.
 - `view`: convert among VCF, BGZF VCF, raw BCF, and BGZF BCF while selecting
@@ -50,6 +52,33 @@ seconds. The 300,000-record, eight-sample typed transfer used 5.1 versus 8.3 MB
 RSS but took 8.495 versus 1.560 seconds. This is a bounded-memory advantage,
 not a general throughput claim; the complete distributions and fingerprints
 are in `PERFORMANCE.md`.
+
+`reheader` composes complete header replacement, FAI contig synchronization,
+and positional or old-to-new sample renaming in that order. It preserves the
+input encoding across plain VCF, BGZF VCF, raw BCF, and BGZF BCF. Named output
+is atomic, and every requested edit is validated before commit.
+
+```console
+rsomics-vcf reheader -H header.vcfh -o renamed.vcf calls.vcf
+rsomics-vcf reheader -f reference.fa.fai -N samples.tsv -o renamed.bcf calls.bcf
+rsomics-vcf reheader -n tumor,normal calls.vcf.gz > renamed.vcf.gz
+```
+
+Plain VCF record bytes are copied unchanged. BGZF VCF rewrites only header
+frames, preserves the remaining compressed record frames byte for byte, and
+requires one canonical EOF block. BCF records are streamed through stable
+edited dictionaries so removed definitions still referenced by a record fail
+nonzero. Sample count mismatches, unknown mapping sources, duplicate final
+names, malformed FAI rows, ordinary gzip input, truncated data, and unsafe
+output aliases also fail instead of producing a partial artifact. Nonzero
+`--threads` is accepted only for BGZF BCF.
+
+The 0.5 release benchmark compares complete output with bcftools 1.24 before
+timing. On a 2,000,000-record Apple M2 workload, plain VCF reheadering used
+0.515 versus 3.075 seconds median wall time and 3.92 versus 6.39 MB median peak
+RSS. BGZF reheadering used 4.64 versus 7.01 MB median peak RSS but took 0.040
+versus 0.020 seconds. The complete distributions, equality hashes, commands,
+and artifact fingerprints are in `PERFORMANCE.md`.
 
 `head` writes VCF text, preserves header order, normalizes the standard PASS
 definition, removes BCF-internal `IDX` fields, and renders typed records
