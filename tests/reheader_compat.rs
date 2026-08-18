@@ -301,7 +301,7 @@ fn declared_success_matrix_matches_bcftools_1_24() {
 fn assert_controlled_failure(output: Output, case: &str) {
     assert!(!output.status.success(), "{case}");
     assert!(
-        !output.status.code().is_some_and(|code| code >= 128),
+        output.status.code().is_none_or(|code| code < 128),
         "{case}: {:?}",
         output.status
     );
