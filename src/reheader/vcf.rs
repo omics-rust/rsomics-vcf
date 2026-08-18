@@ -89,7 +89,7 @@ pub(super) fn rewrite_bgzf<R: Read, W: Write>(
     Ok(summary)
 }
 
-fn inflate_frame(raw: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn inflate_frame(raw: &[u8]) -> Result<Vec<u8>> {
     let mut reader = bgzf::io::Reader::new(Cursor::new(raw));
     let mut inflated = Vec::new();
     reader

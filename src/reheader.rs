@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use rsomics_common::{Context, Result, RsomicsError};
 use serde::Serialize;
 
+use crate::format::bgzf::{Frame, FrameReader};
+
+mod bcf;
 mod fai;
 mod header;
 mod samples;
@@ -19,6 +22,7 @@ pub(crate) enum Encoding {
     PlainVcf,
     BgzfVcf,
     RawBcf,
+    BgzfBcf,
 }
 
 pub(crate) struct Options {
@@ -40,21 +44,82 @@ pub(crate) struct Summary {
 }
 
 pub(crate) fn write<W: Write>(input: &Path, options: &Options, output: W) -> Result<Summary> {
-    let source: Box<dyn Read> = if input == Path::new("-") {
-        Box::new(io::stdin())
-    } else {
-        Box::new(
-            File::open(input)
-                .rs_with_context(|| format!("opening variant input {}", input.display()))?,
-        )
-    };
+    let source = open(input)?;
     let (prefix, source) = prefix(source)?;
     let encoding = detect(&prefix)?;
     let reader = BufReader::new(Cursor::new(prefix).chain(source));
     match encoding {
         Encoding::PlainVcf => vcf::rewrite_plain(reader, output, options),
-        Encoding::BgzfVcf => vcf::rewrite_bgzf(reader, output, options),
-        Encoding::RawBcf => Err(invalid("BCF reheader is not available")),
+        Encoding::BgzfVcf => route_bgzf(reader, output, options),
+        Encoding::RawBcf => bcf::rewrite_raw(reader, output, options),
+        Encoding::BgzfBcf => unreachable!("BGZF input is classified after inflation"),
+    }
+}
+
+pub(crate) fn write_parallel<W>(
+    input: &Path,
+    options: &Options,
+    output: W,
+    workers: usize,
+) -> Result<Summary>
+where
+    W: Write + Send + 'static,
+{
+    let source = open(input)?;
+    let (prefix, source) = prefix(source)?;
+    let encoding = detect(&prefix)?;
+    if encoding != Encoding::BgzfVcf {
+        return Err(RsomicsError::ConfigError(
+            "--threads is available only for BGZF BCF input".to_owned(),
+        ));
+    }
+    let reader = BufReader::new(Cursor::new(prefix).chain(source));
+    let (is_bcf, reader) = inspect_bgzf(reader)?;
+    if !is_bcf {
+        return Err(RsomicsError::ConfigError(
+            "--threads is available only for BGZF BCF input".to_owned(),
+        ));
+    }
+    bcf::rewrite_bgzf_parallel(reader, output, options, workers)
+}
+
+fn open(input: &Path) -> Result<Box<dyn Read>> {
+    if input == Path::new("-") {
+        Ok(Box::new(io::stdin()))
+    } else {
+        File::open(input)
+            .map(|file| Box::new(file) as Box<dyn Read>)
+            .rs_with_context(|| format!("opening variant input {}", input.display()))
+    }
+}
+
+fn route_bgzf<R: Read, W: Write>(input: R, output: W, options: &Options) -> Result<Summary> {
+    let (is_bcf, input) = inspect_bgzf(input)?;
+    if is_bcf {
+        bcf::rewrite_bgzf(input, output, options)
+    } else {
+        vcf::rewrite_bgzf(input, output, options)
+    }
+}
+
+fn inspect_bgzf<R: Read>(input: R) -> Result<(bool, impl Read)> {
+    let mut frames = FrameReader::new(input);
+    let mut raw_prefix = Vec::new();
+    loop {
+        match frames.next().map_err(map_frame_error)? {
+            Some(Frame::Data(raw)) => {
+                let inflated = vcf::inflate_frame(&raw)?;
+                raw_prefix.extend_from_slice(&raw);
+                if !inflated.is_empty() {
+                    return Ok((
+                        inflated.starts_with(b"BCF"),
+                        Cursor::new(raw_prefix).chain(frames.into_inner()),
+                    ));
+                }
+            }
+            Some(Frame::Eof) => return Err(invalid("BGZF stream contains no variant data")),
+            None => return Err(invalid("canonical BGZF EOF block is missing")),
+        }
     }
 }
 
@@ -119,6 +184,14 @@ fn detect(prefix: &[u8]) -> Result<Encoding> {
         ));
     }
     Ok(Encoding::PlainVcf)
+}
+
+fn map_frame_error(error: io::Error) -> RsomicsError {
+    if error.kind() == io::ErrorKind::InvalidData {
+        invalid(format!("reading BGZF stream: {error}"))
+    } else {
+        RsomicsError::Io(error)
+    }
 }
 
 fn invalid(message: impl Into<String>) -> RsomicsError {

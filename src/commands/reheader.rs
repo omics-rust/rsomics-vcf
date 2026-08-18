@@ -62,12 +62,6 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
                 .to_owned(),
         ));
     }
-    if arguments.threads != 0 {
-        return Err(RsomicsError::ConfigError(
-            "--threads is available only for BGZF BCF input".to_owned(),
-        ));
-    }
-
     let samples = arguments
         .samples_list
         .map(SampleSource::List)
@@ -84,10 +78,23 @@ pub(crate) fn execute(arguments: Arguments, json: bool) -> Result<CommandOutput>
         samples,
     };
     let summary = if arguments.output == Path::new("-") {
-        reheader::write(&arguments.input, &options, io::stdout().lock())?
+        if arguments.threads == 0 {
+            reheader::write(&arguments.input, &options, io::stdout().lock())?
+        } else {
+            reheader::write_parallel(&arguments.input, &options, io::stdout(), arguments.threads)?
+        }
     } else {
         let mut transaction = AtomicFile::new(&arguments.output)?;
-        let summary = reheader::write(&arguments.input, &options, transaction.file_mut())?;
+        let summary = if arguments.threads == 0 {
+            reheader::write(&arguments.input, &options, transaction.file_mut())?
+        } else {
+            reheader::write_parallel(
+                &arguments.input,
+                &options,
+                transaction.reopen()?,
+                arguments.threads,
+            )?
+        };
         transaction.commit()?;
         summary
     };

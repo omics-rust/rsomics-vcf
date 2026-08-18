@@ -11,6 +11,14 @@ const HEADER: &[u8] = b"##fileformat=VCFv4.3\n\
 ##contig=<ID=chr1,length=10>\n\
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n";
 
+const BCF_SOURCE: &[u8] = b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=100,IDX=2>\n\
+##FILTER=<ID=q10,Description=\"low quality\",IDX=4>\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\",IDX=2>\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\",IDX=1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+chr1\t1\t.\tA\tC\t.\tq10\tDP=7\tGT\t0/1\t0/0\n";
+
 struct Fixture {
     _directory: tempfile::TempDir,
     input: PathBuf,
@@ -18,6 +26,73 @@ struct Fixture {
     fai: PathBuf,
     samples: PathBuf,
     body: Vec<u8>,
+}
+
+struct BcfFixture {
+    _directory: tempfile::TempDir,
+    input: PathBuf,
+    replacement: PathBuf,
+    replacement_without_dp: PathBuf,
+    fai: PathBuf,
+    fai_without_used_contig: PathBuf,
+    samples: PathBuf,
+    expected_body: Vec<u8>,
+}
+
+impl BcfFixture {
+    fn new(encoding: &str) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.vcf");
+        let input = directory.path().join(format!("input-{encoding}.bcf"));
+        let replacement = directory.path().join("replacement.vcfh");
+        let replacement_without_dp = directory.path().join("without-dp.vcfh");
+        let fai = directory.path().join("reference.fai");
+        let fai_without_used_contig = directory.path().join("without-chr1.fai");
+        let samples = directory.path().join("samples.tsv");
+        fs::write(&source, BCF_SOURCE).unwrap();
+        success(
+            command()
+                .args(["view", "-O", encoding, "-o"])
+                .arg(&input)
+                .arg(&source)
+                .output()
+                .unwrap(),
+        );
+        fs::write(
+            &replacement,
+            b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=200>\n\
+##contig=<ID=chr2,length=300>\n\
+##FILTER=<ID=q10,Description=\"low quality\">\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\">\n\
+##INFO=<ID=XX,Number=1,Type=Integer,Description=\"new\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tR1\tR2\n",
+        )
+        .unwrap();
+        fs::write(
+            &replacement_without_dp,
+            b"##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=200>\n\
+##FILTER=<ID=q10,Description=\"low quality\">\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tR1\tR2\n",
+        )
+        .unwrap();
+        fs::write(&fai, b"chr1\t1000\nchr2\t2000\n").unwrap();
+        fs::write(&fai_without_used_contig, b"chr2\t2000\n").unwrap();
+        fs::write(&samples, b"R1\tN1\nR2\tN2\n").unwrap();
+        Self {
+            _directory: directory,
+            input,
+            replacement,
+            replacement_without_dp,
+            fai,
+            fai_without_used_contig,
+            samples,
+            expected_body: body(BCF_SOURCE).to_vec(),
+        }
+    }
 }
 
 impl Fixture {
@@ -117,6 +192,41 @@ fn body(source: &[u8]) -> &[u8] {
         }
     }
     panic!("VCF header has no #CHROM line")
+}
+
+fn bcf_header(source: &[u8]) -> String {
+    let raw = if source.starts_with(&[0x1f, 0x8b]) {
+        inflate(source)
+    } else {
+        source.to_vec()
+    };
+    assert_eq!(&raw[..5], b"BCF\x02\x02");
+    let length = u32::from_le_bytes(raw[5..9].try_into().unwrap()) as usize;
+    let text = &raw[9..9 + length];
+    let text = text.strip_suffix(&[0]).unwrap_or(text);
+    String::from_utf8(text.to_vec()).unwrap()
+}
+
+fn decode_bcf(source: &[u8]) -> Vec<u8> {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(file.path(), source).unwrap();
+    success(
+        command()
+            .args(["view", "-O", "v"])
+            .arg(file.path())
+            .output()
+            .unwrap(),
+    )
+    .stdout
+}
+
+fn definition<'a>(header: &'a str, kind: &str, id: &str) -> &'a str {
+    let prefix = format!("##{kind}=<");
+    let id = format!("ID={id}");
+    header
+        .lines()
+        .find(|line| line.starts_with(&prefix) && line.split([',', '<', '>']).any(|v| v == id))
+        .unwrap_or_else(|| panic!("missing {kind}/{id} in {header}"))
 }
 
 #[test]
@@ -438,5 +548,141 @@ fn malformed_bgzf_tails_do_not_replace_an_existing_destination() {
         assert!(error.contains("BGZF"), "case={index}: {error}");
         assert!(!error.contains("not available"), "case={index}: {error}");
         assert_eq!(fs::read(output_path).unwrap(), b"keep", "case={index}");
+    }
+}
+
+#[test]
+fn raw_and_bgzf_bcf_preserve_records_encoding_and_dictionary_indices() {
+    for encoding in ["u", "b"] {
+        let fixture = BcfFixture::new(encoding);
+        let output_path = fixture
+            ._directory
+            .path()
+            .join(format!("output-{encoding}.bcf"));
+        success(
+            command()
+                .args(["reheader", "-H"])
+                .arg(&fixture.replacement)
+                .arg("-f")
+                .arg(&fixture.fai)
+                .arg("-N")
+                .arg(&fixture.samples)
+                .arg("-o")
+                .arg(&output_path)
+                .arg(&fixture.input)
+                .output()
+                .unwrap(),
+        );
+        let output = fs::read(&output_path).unwrap();
+        assert_eq!(output.starts_with(&[0x1f, 0x8b]), encoding == "b");
+        assert_eq!(body(&decode_bcf(&output)), fixture.expected_body);
+
+        let header = bcf_header(&output);
+        assert!(definition(&header, "contig", "chr1").contains("IDX=2"));
+        assert!(definition(&header, "contig", "chr2").contains("IDX=3"));
+        assert!(definition(&header, "FORMAT", "GT").contains("IDX=1"));
+        assert!(definition(&header, "INFO", "DP").contains("IDX=2"));
+        assert!(definition(&header, "FILTER", "q10").contains("IDX=4"));
+        assert!(definition(&header, "INFO", "XX").contains("IDX=5"));
+        assert!(header.contains("\tN1\tN2\n"), "{header}");
+    }
+}
+
+#[test]
+fn removing_used_bcf_definitions_fails_without_replacing_output() {
+    let fixture = BcfFixture::new("b");
+    for (index, arguments) in [
+        ("contig", &fixture.fai_without_used_contig),
+        ("info", &fixture.replacement_without_dp),
+    ] {
+        let output_path = fixture
+            ._directory
+            .path()
+            .join(format!("existing-{index}.bcf"));
+        fs::write(&output_path, b"keep").unwrap();
+        let option = if index == "contig" { "-f" } else { "-H" };
+        let output = command()
+            .args(["reheader", option])
+            .arg(arguments)
+            .arg("-o")
+            .arg(&output_path)
+            .arg(&fixture.input)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{index}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains("panicked"), "{error}");
+        assert!(!error.contains("not available"), "{error}");
+        assert!(error.contains("record"), "{error}");
+        assert_eq!(fs::read(output_path).unwrap(), b"keep", "{index}");
+    }
+}
+
+#[test]
+fn truncated_bcf_and_missing_bgzf_eof_fail_transactionally() {
+    for encoding in ["u", "b"] {
+        let fixture = BcfFixture::new(encoding);
+        let broken = fixture
+            ._directory
+            .path()
+            .join(format!("broken-{encoding}.bcf"));
+        let mut bytes = fs::read(&fixture.input).unwrap();
+        if encoding == "b" {
+            bytes.truncate(bytes.len() - crate_eof_block().len());
+        } else {
+            bytes.truncate(bytes.len() - 3);
+        }
+        fs::write(&broken, bytes).unwrap();
+        let output_path = fixture
+            ._directory
+            .path()
+            .join(format!("existing-{encoding}.bcf"));
+        fs::write(&output_path, b"keep").unwrap();
+        let output = command()
+            .args(["reheader", "-n", "N1,N2", "-o"])
+            .arg(&output_path)
+            .arg(&broken)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{encoding}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains("not available"), "{encoding}: {error}");
+        assert_eq!(fs::read(output_path).unwrap(), b"keep", "{encoding}");
+    }
+}
+
+#[test]
+fn bcf_threads_and_standard_input_follow_the_encoding_contract() {
+    let raw = BcfFixture::new("u");
+    let rejected = command()
+        .args(["reheader", "-n", "N1,N2", "--threads", "1"])
+        .arg(&raw.input)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("BGZF BCF"));
+
+    let compressed = BcfFixture::new("b");
+    let parallel = compressed._directory.path().join("parallel.bcf");
+    success(
+        command()
+            .args(["reheader", "-n", "N1,N2", "--threads", "2", "-o"])
+            .arg(&parallel)
+            .arg(&compressed.input)
+            .output()
+            .unwrap(),
+    );
+    let parallel = fs::read(parallel).unwrap();
+    assert!(parallel.starts_with(&[0x1f, 0x8b]));
+    assert_eq!(body(&decode_bcf(&parallel)), compressed.expected_body);
+
+    for fixture in [raw, compressed] {
+        let input = fs::read(&fixture.input).unwrap();
+        let output = success(with_stdin(&["reheader", "-n", "N1,N2"], &input));
+        assert_eq!(
+            output.stdout.starts_with(&[0x1f, 0x8b]),
+            input.starts_with(&[0x1f, 0x8b])
+        );
+        assert_eq!(body(&decode_bcf(&output.stdout)), fixture.expected_body);
     }
 }

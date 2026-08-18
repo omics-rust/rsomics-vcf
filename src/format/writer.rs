@@ -5,7 +5,10 @@ use noodles_bcf as bcf;
 use noodles_bgzf as bgzf;
 use noodles_vcf::{
     self as vcf,
-    header::record::value::map::{format::Type as FormatType, info::Type},
+    header::{
+        StringMaps,
+        record::value::map::{format::Type as FormatType, info::Type},
+    },
     variant::{
         RecordBuf,
         io::Write as _,
@@ -26,9 +29,9 @@ where
     W: Write,
 {
     Vcf(vcf::io::Writer<BufWriter<W>>),
-    VcfBgzf(vcf::io::Writer<bgzf::io::Writer<W>>),
-    Bcf(bcf::io::Writer<bgzf::io::Writer<W>>),
-    BcfRaw(bcf::io::Writer<BufWriter<W>>),
+    VcfBgzf(vcf::io::Writer<BgzfWriter<W>>),
+    Bcf(bcf::io::Writer<HeaderGate<BgzfWriter<W>>>),
+    BcfRaw(bcf::io::Writer<HeaderGate<BufWriter<W>>>),
 }
 
 pub(crate) enum ParallelWriter<W>
@@ -36,7 +39,7 @@ where
     W: Write + Send + 'static,
 {
     VcfBgzf(vcf::io::Writer<BoundedBgzf<W>>),
-    Bcf(bcf::io::Writer<BoundedBgzf<W>>),
+    Bcf(bcf::io::Writer<HeaderGate<BoundedBgzf<W>>>),
 }
 
 pub(crate) trait VariantWriter {
@@ -65,6 +68,18 @@ where
     finished: bool,
 }
 
+pub(crate) struct BgzfWriter<W>
+where
+    W: Write,
+{
+    writer: Option<bgzf::io::Writer<W>>,
+}
+
+pub(crate) struct HeaderGate<W> {
+    inner: W,
+    open: bool,
+}
+
 impl<W> Writer<W>
 where
     W: Write,
@@ -72,11 +87,13 @@ where
     pub(crate) fn new(output: W, format: OutputFormat) -> Self {
         match format {
             OutputFormat::Vcf => Self::Vcf(vcf::io::Writer::new(BufWriter::new(output))),
-            OutputFormat::VcfBgzf => {
-                Self::VcfBgzf(vcf::io::Writer::new(bgzf::io::Writer::new(output)))
-            }
-            OutputFormat::Bcf => Self::Bcf(bcf::io::Writer::new(output)),
-            OutputFormat::BcfRaw => Self::BcfRaw(bcf::io::Writer::from(BufWriter::new(output))),
+            OutputFormat::VcfBgzf => Self::VcfBgzf(vcf::io::Writer::new(BgzfWriter::new(output))),
+            OutputFormat::Bcf => Self::Bcf(bcf::io::Writer::from(HeaderGate::new(
+                BgzfWriter::new(output),
+            ))),
+            OutputFormat::BcfRaw => Self::BcfRaw(bcf::io::Writer::from(HeaderGate::new(
+                BufWriter::new(output),
+            ))),
         }
     }
 
@@ -87,8 +104,8 @@ where
         match self {
             Self::Vcf(writer) => writer.write_header(header),
             Self::VcfBgzf(writer) => writer.write_header(header),
-            Self::Bcf(writer) => writer.write_header(header),
-            Self::BcfRaw(writer) => writer.write_header(header),
+            Self::Bcf(writer) => write_bcf_header(writer, header),
+            Self::BcfRaw(writer) => write_bcf_header(writer, header),
         }
         .map_err(|error| map_write_error(error, "writing variant header"))
     }
@@ -136,9 +153,9 @@ where
     pub(crate) fn finish(&mut self) -> Result<()> {
         match self {
             Self::Vcf(writer) => writer.get_mut().flush(),
-            Self::VcfBgzf(writer) => writer.get_mut().try_finish(),
-            Self::Bcf(writer) => writer.try_finish(),
-            Self::BcfRaw(writer) => writer.get_mut().flush(),
+            Self::VcfBgzf(writer) => writer.get_mut().finish(),
+            Self::Bcf(writer) => writer.get_mut().inner.finish(),
+            Self::BcfRaw(writer) => writer.get_mut().inner.flush(),
         }
         .map_err(RsomicsError::Io)
     }
@@ -188,9 +205,9 @@ where
             OutputFormat::VcfBgzf => Ok(Self::VcfBgzf(vcf::io::Writer::new(BoundedBgzf::new(
                 output, workers,
             )?))),
-            OutputFormat::Bcf => Ok(Self::Bcf(bcf::io::Writer::from(BoundedBgzf::new(
-                output, workers,
-            )?))),
+            OutputFormat::Bcf => Ok(Self::Bcf(bcf::io::Writer::from(HeaderGate::new(
+                BoundedBgzf::new(output, workers)?,
+            )))),
             OutputFormat::Vcf | OutputFormat::BcfRaw => Err(RsomicsError::ConfigError(
                 "compression workers require BGZF VCF or BCF output".to_owned(),
             )),
@@ -201,7 +218,7 @@ where
     fn worker_count(&self) -> usize {
         match self {
             Self::VcfBgzf(writer) => writer.get_ref().worker_count(),
-            Self::Bcf(writer) => writer.get_ref().worker_count(),
+            Self::Bcf(writer) => writer.get_ref().inner.worker_count(),
         }
     }
 }
@@ -216,7 +233,7 @@ where
         }
         match self {
             Self::VcfBgzf(writer) => writer.write_header(header),
-            Self::Bcf(writer) => writer.write_header(header),
+            Self::Bcf(writer) => write_bcf_header(writer, header),
         }
         .map_err(|error| map_write_error(error, "writing variant header"))
     }
@@ -261,7 +278,7 @@ where
     fn finish(&mut self) -> Result<()> {
         match self {
             Self::VcfBgzf(writer) => writer.get_mut().finish(),
-            Self::Bcf(writer) => writer.get_mut().finish(),
+            Self::Bcf(writer) => writer.get_mut().inner.finish(),
         }
         .map_err(RsomicsError::Io)
     }
@@ -302,6 +319,44 @@ where
     }
 }
 
+impl<W> BgzfWriter<W>
+where
+    W: Write,
+{
+    fn new(output: W) -> Self {
+        Self {
+            writer: Some(bgzf::io::Writer::new(output)),
+        }
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        if let Some(writer) = self.writer.take() {
+            writer.finish().map(drop)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<W> Write for BgzfWriter<W>
+where
+    W: Write,
+{
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.writer
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("BGZF writer is finished"))?
+            .write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("BGZF writer is finished"))?
+            .flush()
+    }
+}
+
 impl<W> Write for BoundedBgzf<W>
 where
     W: Write + Send + 'static,
@@ -312,6 +367,33 @@ where
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.pool.install(|| self.writer.flush())
+    }
+}
+
+impl<W> HeaderGate<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, open: false }
+    }
+}
+
+impl<W> Write for HeaderGate<W>
+where
+    W: Write,
+{
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self.open {
+            self.inner.write(buffer)
+        } else {
+            Ok(buffer.len())
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.open {
+            self.inner.flush()
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -331,6 +413,103 @@ fn map_write_error(error: std::io::Error, context: &str) -> RsomicsError {
     } else {
         RsomicsError::Io(std::io::Error::new(error.kind(), message))
     }
+}
+
+fn write_bcf_header<W>(
+    writer: &mut bcf::io::Writer<HeaderGate<W>>,
+    header: &vcf::Header,
+) -> std::io::Result<()>
+where
+    W: Write,
+{
+    writer.get_mut().open = false;
+    writer.write_header(header)?;
+    let encoded = encode_bcf_header(header)?;
+    writer.get_mut().open = true;
+    writer.get_mut().write_all(&encoded)
+}
+
+fn encode_bcf_header(header: &vcf::Header) -> std::io::Result<Vec<u8>> {
+    let maps = StringMaps::try_from(header)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let mut writer = vcf::io::Writer::new(Vec::new());
+    writer.write_header(header)?;
+    let text = add_dictionary_indices(&writer.into_inner(), &maps)?;
+    let length = text.len().checked_add(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "BCF header length exceeds usize",
+        )
+    })?;
+    let length = u32::try_from(length)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let mut encoded = Vec::with_capacity(9 + text.len() + 1);
+    encoded.extend_from_slice(b"BCF\x02\x02");
+    encoded.extend_from_slice(&length.to_le_bytes());
+    encoded.extend_from_slice(&text);
+    encoded.push(0);
+    Ok(encoded)
+}
+
+fn add_dictionary_indices(source: &[u8], maps: &StringMaps) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(source.len());
+    for line in source.split_inclusive(|byte| *byte == b'\n') {
+        let map = if line.starts_with(b"##contig=<") {
+            Some(maps.contigs())
+        } else if line.starts_with(b"##INFO=<")
+            || line.starts_with(b"##FILTER=<")
+            || line.starts_with(b"##FORMAT=<")
+        {
+            Some(maps.strings())
+        } else {
+            None
+        };
+        let Some(map) = map else {
+            output.extend_from_slice(line);
+            continue;
+        };
+        let id = map_id(line)?;
+        let index = map.get_index_of(id).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("missing BCF dictionary index for {id}"),
+            )
+        })?;
+        let end = line.iter().rposition(|byte| *byte == b'>').ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid structured VCF header record",
+            )
+        })?;
+        output.extend_from_slice(&line[..end]);
+        write!(output, ",IDX={index}")?;
+        output.extend_from_slice(&line[end..]);
+    }
+    Ok(output)
+}
+
+fn map_id(line: &[u8]) -> std::io::Result<&str> {
+    let start = line
+        .windows(3)
+        .position(|window| window == b"ID=")
+        .map(|index| index + 3)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "structured VCF header record is missing ID",
+            )
+        })?;
+    let length = line[start..]
+        .iter()
+        .position(|byte| matches!(byte, b',' | b'>'))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "structured VCF header record has an unterminated ID",
+            )
+        })?;
+    std::str::from_utf8(&line[start..start + length])
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
 fn bcf_record<'a>(header: &vcf::Header, record: &'a RecordBuf) -> Result<Cow<'a, RecordBuf>> {
@@ -466,6 +645,54 @@ mod tests {
         let compressed = bytes.lock().unwrap().clone();
         let mut reader = bcf::io::Reader::new(Cursor::new(compressed));
         reader.read_header().unwrap();
+    }
+
+    #[test]
+    fn single_threaded_bgzf_writes_one_eof_block() {
+        for format in [OutputFormat::VcfBgzf, OutputFormat::Bcf] {
+            let output = SharedOutput::default();
+            let bytes = output.0.clone();
+            let mut writer = Writer::new(output, format);
+            writer
+                .write_header(&vcf::Header::default(), HeaderMode::Full)
+                .unwrap();
+            writer.finish().unwrap();
+
+            let compressed = bytes.lock().unwrap().clone();
+            let prefix = compressed
+                .strip_suffix(&crate::format::bgzf::EOF_BLOCK)
+                .unwrap();
+            assert!(!prefix.ends_with(&crate::format::bgzf::EOF_BLOCK));
+        }
+    }
+
+    #[test]
+    fn bcf_preserves_nonsequential_dictionary_indices() {
+        let raw = "##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=1,IDX=2>\n\
+##FILTER=<ID=q10,Description=\"low\",IDX=4>\n\
+##INFO=<ID=DP,Number=1,Type=Integer,Description=\"depth\",IDX=2>\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"genotype\",IDX=1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n";
+        let header: vcf::Header = raw.parse().unwrap();
+        let source =
+            vcf::Record::try_from(b"chr1\t1\t.\tA\tC\t.\tq10\tDP=2\tGT\t0/1".as_slice()).unwrap();
+        let record = RecordBuf::try_from_variant_record(&header, &source).unwrap();
+        let output = SharedOutput::default();
+        let bytes = output.0.clone();
+        let mut writer = Writer::new(output, OutputFormat::BcfRaw);
+        writer.write_header(&header, HeaderMode::Full).unwrap();
+        writer.write_record(&header, &record, 1).unwrap();
+        writer.finish().unwrap();
+
+        let raw = bytes.lock().unwrap().clone();
+        let mut reader = bcf::io::Reader::from(Cursor::new(raw));
+        let header = reader.read_header().unwrap();
+        assert_eq!(header.string_maps().contigs().get_index(2), Some("chr1"));
+        assert_eq!(header.string_maps().strings().get_index(1), Some("GT"));
+        assert_eq!(header.string_maps().strings().get_index(2), Some("DP"));
+        assert_eq!(header.string_maps().strings().get_index(4), Some("q10"));
+        assert!(reader.record_bufs(&header).next().unwrap().is_ok());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 
 pub(crate) const EOF_BLOCK: [u8; 28] = [
     0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02, 0x00,
@@ -22,6 +22,10 @@ impl<R> FrameReader<R> {
             inner,
             finished: false,
         }
+    }
+
+    pub(crate) fn into_inner(self) -> R {
+        self.inner
     }
 }
 
@@ -78,6 +82,48 @@ impl<R: Read> FrameReader<R> {
             if raw == EOF_BLOCK {
                 return Ok(copied);
             }
+        }
+    }
+}
+
+pub(crate) struct ValidatedReader<R> {
+    frames: FrameReader<R>,
+    current: Cursor<Vec<u8>>,
+    complete: bool,
+}
+
+impl<R> ValidatedReader<R> {
+    pub(crate) fn new(inner: R) -> Self {
+        Self {
+            frames: FrameReader::new(inner),
+            current: Cursor::new(Vec::new()),
+            complete: false,
+        }
+    }
+}
+
+impl<R: Read> Read for ValidatedReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let read = self.current.read(buffer)?;
+            if read != 0 {
+                return Ok(read);
+            }
+            if self.complete {
+                return Ok(0);
+            }
+            let raw = match self.frames.next()? {
+                Some(Frame::Data(raw)) => raw,
+                Some(Frame::Eof) => {
+                    self.complete = true;
+                    EOF_BLOCK.to_vec()
+                }
+                None => return Err(invalid("canonical BGZF EOF block is missing")),
+            };
+            self.current = Cursor::new(raw);
         }
     }
 }
