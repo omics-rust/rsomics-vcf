@@ -53,7 +53,7 @@ pub(crate) fn write<W: Write>(input: &Path, options: &Options, output: W) -> Res
     let reader = BufReader::new(Cursor::new(prefix).chain(source));
     match encoding {
         Encoding::PlainVcf => vcf::rewrite_plain(reader, output, options),
-        Encoding::BgzfVcf => Err(invalid("BGZF VCF reheader is not available")),
+        Encoding::BgzfVcf => vcf::rewrite_bgzf(reader, output, options),
         Encoding::RawBcf => Err(invalid("BCF reheader is not available")),
     }
 }

@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -74,6 +74,49 @@ fn with_stdin(arguments: &[&str], input: &[u8]) -> Output {
         .unwrap();
     child.stdin.take().unwrap().write_all(input).unwrap();
     child.wait_with_output().unwrap()
+}
+
+fn bgzf_bytes(chunks: &[&[u8]]) -> Vec<u8> {
+    let mut writer = noodles_bgzf::io::Writer::new(Vec::new());
+    for chunk in chunks {
+        writer.write_all(chunk).unwrap();
+        writer.flush().unwrap();
+    }
+    writer.finish().unwrap()
+}
+
+fn raw_frames(source: &[u8]) -> Vec<&[u8]> {
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    while offset < source.len() {
+        assert!(source.len() - offset >= 18);
+        let length = usize::from(u16::from_le_bytes([
+            source[offset + 16],
+            source[offset + 17],
+        ])) + 1;
+        assert!(source.len() - offset >= length);
+        frames.push(&source[offset..offset + length]);
+        offset += length;
+    }
+    frames
+}
+
+fn inflate(source: &[u8]) -> Vec<u8> {
+    let mut reader = noodles_bgzf::io::Reader::new(source);
+    let mut output = Vec::new();
+    reader.read_to_end(&mut output).unwrap();
+    output
+}
+
+fn body(source: &[u8]) -> &[u8] {
+    let mut offset = 0;
+    for line in source.split_inclusive(|byte| *byte == b'\n') {
+        offset += line.len();
+        if line.starts_with(b"#CHROM\t") {
+            return &source[offset..];
+        }
+    }
+    panic!("VCF header has no #CHROM line")
 }
 
 #[test]
@@ -247,17 +290,153 @@ fn rejects_ordinary_gzip_with_a_conversion_diagnostic() {
 }
 
 #[test]
-fn nonzero_threads_are_rejected_for_plain_vcf() {
+fn nonzero_threads_are_rejected_for_vcf() {
     let fixture = Fixture::new();
-    let output = command()
-        .args(["reheader", "-n", "N1,N2", "--threads", "1"])
-        .arg(&fixture.input)
-        .output()
+    let compressed = fixture._directory.path().join("input.vcf.gz");
+    fs::write(
+        &compressed,
+        bgzf_bytes(&[&fs::read(&fixture.input).unwrap()]),
+    )
+    .unwrap();
+    for input in [&fixture.input, &compressed] {
+        let output = command()
+            .args(["reheader", "-n", "N1,N2", "--threads", "1"])
+            .arg(input)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("BGZF BCF"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn bgzf_rewrites_only_the_prefix_frames() {
+    let fixture = Fixture::new();
+    let mut later_body = Vec::new();
+    for position in 2..20_000 {
+        writeln!(
+            later_body,
+            "chr1\t{position}\t.\tA\tC\t.\tPASS\t.\tGT\t0/1\t0/0"
+        )
         .unwrap();
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("BGZF BCF"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    }
+    let first = [HEADER, fixture.body.as_slice()].concat();
+    let input = bgzf_bytes(&[&first, &later_body]);
+    let input_path = fixture._directory.path().join("input.vcf.gz");
+    fs::write(&input_path, &input).unwrap();
+    let original_frames = raw_frames(&input);
+    let unchanged_tail = original_frames[1..].concat();
+
+    let output = success(
+        command()
+            .args(["reheader", "-n", "N1,N2"])
+            .arg(input_path)
+            .output()
+            .unwrap(),
     );
+    let inflated = inflate(&output.stdout);
+    assert!(inflated.windows(6).any(|window| window == b"N1\tN2\n"));
+    assert_eq!(body(&inflated), [fixture.body, later_body].concat());
+    assert!(output.stdout.ends_with(&unchanged_tail));
+}
+
+#[test]
+fn bgzf_handles_a_header_spanning_multiple_frames() {
+    let fixture = Fixture::new();
+    let mut header = b"##fileformat=VCFv4.3\n".to_vec();
+    for index in 0..6000 {
+        writeln!(header, "##meta{index}=abcdefghijklmnop").unwrap();
+    }
+    header.extend_from_slice(
+        b"##contig=<ID=chr1,length=10>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n",
+    );
+    let input = bgzf_bytes(&[&[header.as_slice(), fixture.body.as_slice()].concat()]);
+    let input_path = fixture._directory.path().join("large-header.vcf.gz");
+    fs::write(&input_path, input).unwrap();
+    let output = success(
+        command()
+            .args(["reheader", "-n", "N1,N2"])
+            .arg(input_path)
+            .output()
+            .unwrap(),
+    );
+    let inflated = inflate(&output.stdout);
+    assert!(inflated.windows(6).any(|window| window == b"N1\tN2\n"));
+    assert_eq!(body(&inflated), fixture.body);
+}
+
+#[test]
+fn bgzf_header_only_stdin_emits_one_complete_eof() {
+    let input = bgzf_bytes(&[HEADER]);
+    let output = success(with_stdin(&["reheader", "-n", "N1,N2"], &input));
+    let frames = raw_frames(&output.stdout);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| **frame == crate_eof_block())
+            .count(),
+        1
+    );
+    assert!(inflate(&output.stdout).ends_with(b"N1\tN2\n"));
+}
+
+fn crate_eof_block() -> &'static [u8] {
+    &[
+        0x1f, 0x8b, 0x08, 0x04, 0, 0, 0, 0, 0, 0xff, 6, 0, b'B', b'C', 2, 0, 27, 0, 3, 0, 0, 0, 0,
+        0, 0, 0, 0, 0,
+    ]
+}
+
+#[test]
+fn malformed_bgzf_tails_do_not_replace_an_existing_destination() {
+    let fixture = Fixture::new();
+    let first = [HEADER, fixture.body.as_slice()].concat();
+    let valid = bgzf_bytes(&[
+        first.as_slice(),
+        b"chr1\t2\t.\tA\tG\t.\tPASS\t.\tGT\t0/0\t0/1\n",
+    ]);
+    let first_frame = raw_frames(&valid)[0].len();
+    let mut cases = Vec::new();
+
+    let mut missing_eof = valid.clone();
+    missing_eof.truncate(missing_eof.len() - crate_eof_block().len());
+    cases.push(missing_eof);
+    cases.push(valid[..first_frame + 19].to_vec());
+
+    let mut invalid_size = valid.clone();
+    invalid_size[first_frame + 16..first_frame + 18].copy_from_slice(&0u16.to_le_bytes());
+    cases.push(invalid_size);
+
+    let mut trailing = valid;
+    trailing.extend_from_slice(b"trailing");
+    cases.push(trailing);
+
+    for (index, case) in cases.into_iter().enumerate() {
+        let input = fixture
+            ._directory
+            .path()
+            .join(format!("broken-{index}.vcf.gz"));
+        let output_path = fixture
+            ._directory
+            .path()
+            .join(format!("output-{index}.vcf.gz"));
+        fs::write(&input, case).unwrap();
+        fs::write(&output_path, b"keep").unwrap();
+        let output = command()
+            .args(["reheader", "-n", "N1,N2", "-o"])
+            .arg(&output_path)
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "case={index}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("BGZF"), "case={index}: {error}");
+        assert!(!error.contains("not available"), "case={index}: {error}");
+        assert_eq!(fs::read(output_path).unwrap(), b"keep", "case={index}");
+    }
 }
