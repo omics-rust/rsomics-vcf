@@ -5,6 +5,8 @@ use std::path::Path;
 use noodles_vcf as vcf;
 use rsomics_common::{Context, Result, RsomicsError};
 
+use super::samples::{SampleEdit, SampleSource};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct HeaderText {
     metadata: Vec<String>,
@@ -105,6 +107,24 @@ impl HeaderText {
         text.parse()
             .map_err(|error| invalid(format!("parsing VCF header: {error}")))
     }
+
+    pub(super) fn apply_samples(&mut self, source: &SampleSource) -> Result<()> {
+        let edit = SampleEdit::read(source)?;
+        let names = edit.apply(self.sample_names())?;
+        self.set_samples(names)
+    }
+
+    fn set_samples(&mut self, names: Vec<String>) -> Result<()> {
+        let mut columns = self.columns[..9].to_vec();
+        columns.extend(names);
+        let edited = Self {
+            metadata: self.metadata.clone(),
+            columns,
+        };
+        edited.parse_noodles()?;
+        *self = edited;
+        Ok(())
+    }
 }
 
 fn parse_columns(line: &str) -> Result<Vec<String>> {
@@ -154,6 +174,8 @@ fn invalid(message: impl Into<String>) -> RsomicsError {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+
+    use crate::reheader::samples::SampleSource;
 
     use super::HeaderText;
 
@@ -230,5 +252,17 @@ mod tests {
         let parsed = header.parse_noodles().unwrap();
         assert_eq!(parsed.sample_names().len(), 2);
         assert_eq!(parsed.contigs().len(), 1);
+    }
+
+    #[test]
+    fn sample_edits_replace_only_the_terminal_columns() {
+        let mut header = HeaderText::parse(HEADER_TWO_SAMPLES.as_bytes()).unwrap();
+        header
+            .apply_samples(&SampleSource::List("Tumor,Normal".to_owned()))
+            .unwrap();
+        assert_eq!(
+            header.render(),
+            b"##fileformat=VCFv4.3\n##source=original\n##contig=<ID=chr1,length=100>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tTumor\tNormal\n"
+        );
     }
 }
