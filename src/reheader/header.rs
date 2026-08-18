@@ -5,6 +5,7 @@ use std::path::Path;
 use noodles_vcf as vcf;
 use rsomics_common::{Context, Result, RsomicsError};
 
+use super::fai::{Fai, rewrite_contigs};
 use super::samples::{SampleEdit, SampleSource};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,6 +121,17 @@ impl HeaderText {
         let edited = Self {
             metadata: self.metadata.clone(),
             columns,
+        };
+        edited.parse_noodles()?;
+        *self = edited;
+        Ok(())
+    }
+
+    pub(super) fn apply_fai(&mut self, path: &Path) -> Result<()> {
+        let fai = Fai::read(path)?;
+        let edited = Self {
+            metadata: rewrite_contigs(&self.metadata, &fai)?,
+            columns: self.columns.clone(),
         };
         edited.parse_noodles()?;
         *self = edited;
