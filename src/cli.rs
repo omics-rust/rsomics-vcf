@@ -46,6 +46,9 @@ enum Command {
     /// Extract variant fields with a typed format string
     Query(commands::query::Arguments),
 
+    /// Replace VCF or BCF headers, contigs, and sample names
+    Reheader(commands::reheader::Arguments),
+
     /// Validate VCF or BCF structure and typed values
     Validate(commands::validate::Arguments),
 
@@ -62,6 +65,7 @@ pub(crate) enum CommandOutput {
     Index { outcome: crate::index::Outcome },
     Norm { summary: crate::norm::Summary },
     Query { summary: crate::query::Summary },
+    Reheader { summary: crate::reheader::Summary },
     Validate { report: crate::validate::Report },
     View { summary: crate::view::Summary },
 }
@@ -92,6 +96,9 @@ fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
         }
         Command::Query(arguments) => {
             commands::query::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
+        Command::Reheader(arguments) => {
+            commands::reheader::execute(arguments, cli.output.json).map(Validation::Valid)
         }
         Command::Validate(arguments) => commands::validate::execute(arguments, cli.output.json),
         Command::View(arguments) => {

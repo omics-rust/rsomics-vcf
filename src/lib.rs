@@ -17,7 +17,6 @@ mod norm;
 mod query_bcf;
 mod query_format;
 mod regions;
-#[allow(dead_code)]
 mod reheader;
 mod validation;
 mod variant_type;
