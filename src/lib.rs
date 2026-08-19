@@ -13,6 +13,7 @@ mod commands;
 mod expression;
 mod filter;
 mod format;
+mod genotype;
 mod norm;
 mod query_bcf;
 mod query_format;
