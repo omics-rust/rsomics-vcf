@@ -1,13 +1,13 @@
 use rsomics_common::{Result, RsomicsError};
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Target {
-    pub principal: Principal,
-    pub random_fraction: Option<f64>,
+pub(crate) struct Target {
+    pub(crate) principal: Principal,
+    pub(crate) random_fraction: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Principal {
+pub(crate) enum Principal {
     AnyMissing,
     PartialMissing,
     CompleteMissing,
@@ -17,14 +17,14 @@ pub(super) enum Principal {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Binomial {
-    pub tag: String,
-    pub comparison: Comparison,
-    pub threshold: f64,
+pub(crate) struct Binomial {
+    pub(crate) tag: String,
+    pub(crate) comparison: Comparison,
+    pub(crate) threshold: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Comparison {
+pub(crate) enum Comparison {
     Less,
     LessEqual,
     Equal,
@@ -33,7 +33,7 @@ pub(super) enum Comparison {
 }
 
 impl Target {
-    pub fn parse(values: &[String]) -> Result<Self> {
+    pub(crate) fn parse(values: &[String]) -> Result<Self> {
         match values {
             [value] if value.starts_with("r:") => Ok(Self {
                 principal: Principal::All,

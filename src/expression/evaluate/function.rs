@@ -9,6 +9,9 @@ use super::{EvaluateError, Evaluated};
 mod binomial;
 mod fisher;
 
+#[cfg(test)]
+pub(crate) use binomial::binomial_two_sided;
+
 pub(super) fn evaluate<'a>(
     kind: FunctionKind,
     mut arguments: Vec<Evaluated<'a>>,

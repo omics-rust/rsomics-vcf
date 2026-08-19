@@ -17,6 +17,9 @@ use arithmetic::{arithmetic, negate};
 use comparison::compare;
 use logical::logical;
 
+#[cfg(test)]
+pub(crate) use function::binomial_two_sided;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Truth {
     site: bool,
@@ -38,6 +41,13 @@ impl Truth {
         self.samples
             .as_ref()
             .map(|samples| samples.passes.as_slice())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sample_selection(&self) -> Option<&[bool]> {
+        self.samples
+            .as_ref()
+            .map(|samples| samples.selected.as_ref())
     }
 
     fn site(value: bool) -> Self {

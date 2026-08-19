@@ -130,7 +130,7 @@ fn probability<'a>(left: &Atom<'_>, right: &Atom<'_>) -> Result<Atom<'a>, Evalua
         .unwrap_or(Atom::Missing))
 }
 
-fn binomial_two_sided(left: i32, right: i32) -> Option<f64> {
+pub(crate) fn binomial_two_sided(left: i32, right: i32) -> Option<f64> {
     if left == 0 && right == 0 {
         None
     } else if left == right {

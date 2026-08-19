@@ -5,9 +5,9 @@ pub(crate) use counts::{InfoPolicy, reconcile_ac_an};
 pub(crate) use edit::{MissingPolicy, edit_selected};
 
 #[cfg(test)]
-use counts::{AlleleCounts, allele_counts};
+pub(crate) use counts::{AlleleCounts, allele_counts};
 #[cfg(test)]
-use edit::Change;
+pub(crate) use edit::Change;
 
 #[cfg(test)]
 mod tests {

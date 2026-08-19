@@ -4,6 +4,8 @@ mod raw;
 mod syntax;
 mod value;
 
+#[cfg(test)]
+pub(crate) use evaluate::binomial_two_sided;
 pub(crate) use raw::Predicate as RawPredicate;
 
 use std::fmt;
