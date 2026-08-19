@@ -31,8 +31,8 @@ where
 {
     Vcf(vcf::io::Writer<BufWriter<W>>),
     VcfBgzf(vcf::io::Writer<BgzfWriter<W>>),
-    Bcf(bcf::io::Writer<HeaderGate<BgzfWriter<W>>>),
-    BcfRaw(bcf::io::Writer<HeaderGate<BufWriter<W>>>),
+    Bcf(Box<BcfOutput<BgzfWriter<W>>>),
+    BcfRaw(Box<BcfOutput<BufWriter<W>>>),
 }
 
 pub(crate) enum ParallelWriter<W>
@@ -40,7 +40,7 @@ where
     W: Write + Send + 'static,
 {
     VcfBgzf(vcf::io::Writer<BoundedBgzf<W>>),
-    Bcf(bcf::io::Writer<HeaderGate<BoundedBgzf<W>>>),
+    Bcf(Box<BcfOutput<BoundedBgzf<W>>>),
 }
 
 pub(crate) trait VariantWriter {
@@ -76,9 +76,10 @@ where
     writer: Option<bgzf::io::Writer<W>>,
 }
 
-pub(crate) struct HeaderGate<W> {
+pub(crate) struct BcfOutput<W> {
     inner: W,
-    open: bool,
+    encoder: bcf::io::Writer<Vec<u8>>,
+    string_maps: Option<StringMaps>,
 }
 
 impl<W> Writer<W>
@@ -89,12 +90,8 @@ where
         match format {
             OutputFormat::Vcf => Self::Vcf(vcf::io::Writer::new(BufWriter::new(output))),
             OutputFormat::VcfBgzf => Self::VcfBgzf(vcf::io::Writer::new(BgzfWriter::new(output))),
-            OutputFormat::Bcf => Self::Bcf(bcf::io::Writer::from(HeaderGate::new(
-                BgzfWriter::new(output),
-            ))),
-            OutputFormat::BcfRaw => Self::BcfRaw(bcf::io::Writer::from(HeaderGate::new(
-                BufWriter::new(output),
-            ))),
+            OutputFormat::Bcf => Self::Bcf(Box::new(BcfOutput::new(BgzfWriter::new(output)))),
+            OutputFormat::BcfRaw => Self::BcfRaw(Box::new(BcfOutput::new(BufWriter::new(output)))),
         }
     }
 
@@ -105,8 +102,8 @@ where
         match self {
             Self::Vcf(writer) => writer.write_header(header),
             Self::VcfBgzf(writer) => writer.write_header(header),
-            Self::Bcf(writer) => write_bcf_header(writer, header),
-            Self::BcfRaw(writer) => write_bcf_header(writer, header),
+            Self::Bcf(output) => write_bcf_header(output, header),
+            Self::BcfRaw(output) => write_bcf_header(output, header),
         }
         .map_err(|error| map_write_error(error, "writing variant header"))
     }
@@ -120,9 +117,9 @@ where
         let result = match self {
             Self::Vcf(writer) => writer.write_variant_record(header, record),
             Self::VcfBgzf(writer) => writer.write_variant_record(header, record),
-            Self::Bcf(writer) => return write_bcf_record(writer.get_mut(), header, record, number),
-            Self::BcfRaw(writer) => {
-                return write_bcf_record(writer.get_mut(), header, record, number);
+            Self::Bcf(output) => return output.write_record(header, record, number),
+            Self::BcfRaw(output) => {
+                return output.write_record(header, record, number);
             }
         };
         result.map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
@@ -151,8 +148,8 @@ where
         match self {
             Self::Vcf(writer) => writer.get_mut().flush(),
             Self::VcfBgzf(writer) => writer.get_mut().finish(),
-            Self::Bcf(writer) => writer.get_mut().inner.finish(),
-            Self::BcfRaw(writer) => writer.get_mut().inner.flush(),
+            Self::Bcf(output) => output.inner.finish(),
+            Self::BcfRaw(output) => output.inner.flush(),
         }
         .map_err(RsomicsError::Io)
     }
@@ -202,9 +199,9 @@ where
             OutputFormat::VcfBgzf => Ok(Self::VcfBgzf(vcf::io::Writer::new(BoundedBgzf::new(
                 output, workers,
             )?))),
-            OutputFormat::Bcf => Ok(Self::Bcf(bcf::io::Writer::from(HeaderGate::new(
-                BoundedBgzf::new(output, workers)?,
-            )))),
+            OutputFormat::Bcf => Ok(Self::Bcf(Box::new(BcfOutput::new(BoundedBgzf::new(
+                output, workers,
+            )?)))),
             OutputFormat::Vcf | OutputFormat::BcfRaw => Err(RsomicsError::ConfigError(
                 "compression workers require BGZF VCF or BCF output".to_owned(),
             )),
@@ -215,7 +212,7 @@ where
     fn worker_count(&self) -> usize {
         match self {
             Self::VcfBgzf(writer) => writer.get_ref().worker_count(),
-            Self::Bcf(writer) => writer.get_ref().inner.worker_count(),
+            Self::Bcf(output) => output.inner.worker_count(),
         }
     }
 }
@@ -230,7 +227,7 @@ where
         }
         match self {
             Self::VcfBgzf(writer) => writer.write_header(header),
-            Self::Bcf(writer) => write_bcf_header(writer, header),
+            Self::Bcf(output) => write_bcf_header(output, header),
         }
         .map_err(|error| map_write_error(error, "writing variant header"))
     }
@@ -243,7 +240,7 @@ where
     ) -> Result<()> {
         let result = match self {
             Self::VcfBgzf(writer) => writer.write_variant_record(header, record),
-            Self::Bcf(writer) => return write_bcf_record(writer.get_mut(), header, record, number),
+            Self::Bcf(output) => return output.write_record(header, record, number),
         };
         result.map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
     }
@@ -272,7 +269,7 @@ where
     fn finish(&mut self) -> Result<()> {
         match self {
             Self::VcfBgzf(writer) => writer.get_mut().finish(),
-            Self::Bcf(writer) => writer.get_mut().inner.finish(),
+            Self::Bcf(output) => output.inner.finish(),
         }
         .map_err(RsomicsError::Io)
     }
@@ -364,30 +361,37 @@ where
     }
 }
 
-impl<W> HeaderGate<W> {
+impl<W> BcfOutput<W> {
     fn new(inner: W) -> Self {
-        Self { inner, open: false }
+        Self {
+            inner,
+            encoder: bcf::io::Writer::from(Vec::new()),
+            string_maps: None,
+        }
     }
 }
 
-impl<W> Write for HeaderGate<W>
+impl<W> BcfOutput<W>
 where
     W: Write,
 {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        if self.open {
-            self.inner.write(buffer)
-        } else {
-            Ok(buffer.len())
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if self.open {
-            self.inner.flush()
-        } else {
-            Ok(())
-        }
+    fn write_record(
+        &mut self,
+        header: &vcf::Header,
+        record: &RecordBuf,
+        number: u64,
+    ) -> Result<()> {
+        let string_maps = self.string_maps.as_ref().ok_or_else(|| {
+            RsomicsError::InvalidInput("BCF header must be written before records".to_owned())
+        })?;
+        write_bcf_record(
+            &mut self.inner,
+            &mut self.encoder,
+            header,
+            string_maps,
+            record,
+            number,
+        )
     }
 }
 
@@ -409,26 +413,24 @@ fn map_write_error(error: std::io::Error, context: &str) -> RsomicsError {
     }
 }
 
-fn write_bcf_header<W>(
-    writer: &mut bcf::io::Writer<HeaderGate<W>>,
-    header: &vcf::Header,
-) -> std::io::Result<()>
+fn write_bcf_header<W>(output: &mut BcfOutput<W>, header: &vcf::Header) -> std::io::Result<()>
 where
     W: Write,
 {
-    writer.get_mut().open = false;
-    writer.write_header(header)?;
-    let encoded = encode_bcf_header(header)?;
-    writer.get_mut().open = true;
-    writer.get_mut().write_all(&encoded)
+    let string_maps = StringMaps::try_from(header)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    output.encoder.write_header(header)?;
+    output.encoder.get_mut().clear();
+    let encoded = encode_bcf_header(header, &string_maps)?;
+    output.inner.write_all(&encoded)?;
+    output.string_maps = Some(string_maps);
+    Ok(())
 }
 
-fn encode_bcf_header(header: &vcf::Header) -> std::io::Result<Vec<u8>> {
-    let maps = StringMaps::try_from(header)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+fn encode_bcf_header(header: &vcf::Header, string_maps: &StringMaps) -> std::io::Result<Vec<u8>> {
     let mut writer = vcf::io::Writer::new(Vec::new());
     writer.write_header(header)?;
-    let text = add_dictionary_indices(&writer.into_inner(), &maps)?;
+    let text = add_dictionary_indices(&writer.into_inner(), string_maps)?;
     let length = text.len().checked_add(1).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -508,7 +510,9 @@ fn map_id(line: &[u8]) -> std::io::Result<&str> {
 
 fn write_bcf_record<W>(
     writer: &mut W,
+    encoder: &mut bcf::io::Writer<Vec<u8>>,
     header: &vcf::Header,
+    string_maps: &StringMaps,
     record: &RecordBuf,
     number: u64,
 ) -> Result<()>
@@ -516,29 +520,23 @@ where
     W: Write,
 {
     let record = bcf_record(header, record)?;
-    let encoded = encode_bcf_record(header, record.as_ref())
+    let encoded = encode_bcf_record(encoder, header, string_maps, record.as_ref())
         .map_err(|error| map_write_error(error, &format!("writing variant record {number}")))?;
     writer
-        .write_all(&encoded)
+        .write_all(encoded)
         .map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
 }
 
-fn encode_bcf_record(header: &vcf::Header, record: &RecordBuf) -> std::io::Result<Vec<u8>> {
+fn encode_bcf_record<'a>(
+    encoder: &'a mut bcf::io::Writer<Vec<u8>>,
+    header: &vcf::Header,
+    string_maps: &StringMaps,
+    record: &RecordBuf,
+) -> std::io::Result<&'a [u8]> {
     let (record, genotype_patch) = pad_bcf_genotypes(record)?;
-    let mut encoder = bcf::io::Writer::from(Vec::new());
-    encoder.write_header(header)?;
-    let record_start = encoder.get_ref().len();
+    encoder.get_mut().clear();
     encoder.write_variant_record(header, record.as_ref())?;
-    let raw = encoder.into_inner();
-    let mut encoded = raw
-        .get(record_start..)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "BCF writer produced no record bytes",
-            )
-        })?
-        .to_vec();
+    let encoded = encoder.get_mut();
     if encoded.len() < 8 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -566,7 +564,7 @@ fn encode_bcf_record(header: &vcf::Header, record: &RecordBuf) -> std::io::Resul
         ));
     }
     if let Some(genotype_patch) = genotype_patch {
-        patch_bcf_genotypes(header, &mut encoded[samples_start..], &genotype_patch)?;
+        patch_bcf_genotypes(string_maps, &mut encoded[samples_start..], &genotype_patch)?;
     }
     Ok(encoded)
 }
@@ -641,15 +639,13 @@ fn pad_bcf_genotypes(
 }
 
 fn patch_bcf_genotypes(
-    header: &vcf::Header,
+    string_maps: &StringMaps,
     samples: &mut [u8],
     patch: &BcfGenotypePatch,
 ) -> std::io::Result<()> {
     const INT8_VECTOR_END: u8 = 0x81;
 
-    let maps = StringMaps::try_from(header)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    let genotype_key = maps.strings().get_index_of("GT").ok_or_else(|| {
+    let genotype_key = string_maps.strings().get_index_of("GT").ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "FORMAT/GT is missing from the BCF string map",
