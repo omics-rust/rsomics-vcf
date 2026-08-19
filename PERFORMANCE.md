@@ -10,30 +10,30 @@ normalizer removes only bcftools provenance lines and sorts metadata; column,
 record, site, FORMAT, and sample fields must otherwise match exactly.
 
 The measured implementation revision is
-`aa9b9994e23bc15bc3f2c2988efff2f63c48e27b`. The worktree was clean and the
+`16fc008470056e7bd40637cd3122126d86adc096`. The worktree was clean and the
 exact-head four-platform CI run passed. The generated-input manifest, 180 raw
 measurements, summaries, decisions, semantic hashes, and artifact fingerprints
 are retained under
-`/Volumes/KIOXIA/Developments/tmp/rsomics-vcf-setgt-gate-20260819`.
+`/Volumes/KIOXIA/Developments/tmp/rsomics-vcf-setgt-gate-20260819-16fc008`.
 
 ### Decision
 
-All nine paths pass on strict peak-memory advantage. Median RSS is 22.54% to
-35.16% lower than bcftools. This is not a throughput win: median wall time is
-3.07 to 19.64 times slower. The supported claim is bounded-memory genotype
+All nine paths pass on strict peak-memory advantage. Median RSS is 28.50% to
+37.02% lower than bcftools. This is not a throughput win: median wall time is
+3.20 to 16.60 times slower. The supported claim is bounded-memory genotype
 editing with verified bcftools compatibility, not a faster general replacement.
 
 | Operation | Encoding | rsomics median wall | bcftools median wall | rsomics median RSS | bcftools median RSS | Result |
 |---|---|---:|---:|---:|---:|---|
-| all to missing | VCF | 26.670 s | 8.640 s | 4,653,056 B | 7,143,424 B | 34.86% less RSS |
-| all to missing | BGZF VCF | 20.445 s | 2.740 s | 5,742,592 B | 7,864,320 B | 26.98% less RSS |
-| all to missing | BCF | 27.600 s | 1.405 s | 5,545,984 B | 7,766,016 B | 28.59% less RSS |
-| missing to reference | VCF | 26.550 s | 8.650 s | 4,653,056 B | 7,176,192 B | 35.16% less RSS |
-| missing to reference | BGZF VCF | 20.540 s | 2.770 s | 5,619,712 B | 7,897,088 B | 28.84% less RSS |
-| missing to reference | BCF | 27.245 s | 1.415 s | 5,562,368 B | 7,774,208 B | 28.45% less RSS |
-| query-selected to reference | VCF | 28.255 s | 9.000 s | 4,816,896 B | 7,208,960 B | 33.18% less RSS |
-| query-selected to reference | BGZF VCF | 22.085 s | 2.950 s | 5,742,592 B | 7,938,048 B | 27.66% less RSS |
-| query-selected to reference | BCF | 28.900 s | 1.595 s | 6,053,888 B | 7,815,168 B | 22.54% less RSS |
+| all to missing | VCF | 28.545 s | 8.915 s | 4,472,832 B | 7,102,464 B | 37.02% less RSS |
+| all to missing | BGZF VCF | 20.590 s | 2.780 s | 5,611,520 B | 8,011,776 B | 29.96% less RSS |
+| all to missing | BCF | 23.910 s | 1.440 s | 5,406,720 B | 7,766,016 B | 30.38% less RSS |
+| missing to reference | VCF | 28.310 s | 8.815 s | 4,489,216 B | 7,094,272 B | 36.72% less RSS |
+| missing to reference | BGZF VCF | 20.730 s | 2.805 s | 5,685,248 B | 7,962,624 B | 28.60% less RSS |
+| missing to reference | BCF | 24.835 s | 1.545 s | 5,742,592 B | 8,052,736 B | 28.69% less RSS |
+| query-selected to reference | VCF | 31.070 s | 9.380 s | 4,562,944 B | 7,159,808 B | 36.27% less RSS |
+| query-selected to reference | BGZF VCF | 23.145 s | 3.090 s | 5,758,976 B | 8,224,768 B | 29.98% less RSS |
+| query-selected to reference | BCF | 26.455 s | 1.715 s | 5,816,320 B | 8,134,656 B | 28.50% less RSS |
 
 ### Workload and equality
 
@@ -67,7 +67,7 @@ env CARGO_HOME=/Volumes/KIOXIA/Developments/cargo-home \
   RSOMICS_RUSTC=/opt/homebrew/Cellar/rust/1.97.1/bin/rustc \
   benchmarks/setgt-vs-bcftools.sh \
   --records 2000000 --samples 8 --warmups 3 --runs 10 \
-  --results /Volumes/KIOXIA/Developments/tmp/rsomics-vcf-setgt-gate-20260819
+  --results /Volumes/KIOXIA/Developments/tmp/rsomics-vcf-setgt-gate-20260819-16fc008
 ```
 
 ### Fingerprints
@@ -75,13 +75,13 @@ env CARGO_HOME=/Volumes/KIOXIA/Developments/cargo-home \
 | Artifact | SHA-256 |
 |---|---|
 | benchmark harness | `a7655077f7766a7b14bfecc592119572068e97c98d319a5d9c594176242de873` |
-| rsomics-vcf binary | `207af8b4af26f75c5916472e3cf6a89f8439ac27f271cc621924aac9b99455b8` |
+| rsomics-vcf binary | `0841439098ffea7dd05165379b8b3eb1e62661384bad06fa11ca407b7812877e` |
 | bcftools binary | `33100a6b961c529e915394d53b4737a0f8dd7a164eac352afe4e74e1ced51f60` |
 | rustc binary | `d69d40bfd2e11825feb3538512b6ffcd63de91c35ec36bb876849f0f9f8fe6bd` |
-| generated-input manifest | `49d9fd1b92a3eab9269977305a420178f8e02163c13ceb3fa44138491e7724a9` |
-| raw distribution | `dc9b702d188a6b9685e86d3625556740bdf8520d1c362e8eeb5ad25376717a64` |
-| summary | `cd68e4b4bc808d9c1851f89d8697378c32cfe899cdf9d586693c728cea15a14b` |
-| decision | `595fabec5c4a6407db6064ee1b77d0d1dedd4540d0c4a40f3f16e193da4e6fb2` |
+| generated-input manifest | `71cb1d3bba9d1b592d34ba7b0fa31b6c0bddc09c100f9938b16c1fe0d43351c8` |
+| raw distribution | `2c8d9315fb0776c6a4c4224e0f0b6c2081cc51745f13a47f700734fee5cfb87f` |
+| summary | `edfe5555538482afdd0e35769aff3c52d1ce712cd55e82f9f1d2b2a1b438a4cf` |
+| decision | `513653535942fbef87677356af085214d8afb7f6ef74352ac5f855409c3edd69` |
 | equality ledger | `19fcb178371bc803c3cb676298e010b37a45fd11f905ef1e9e4cda72a87d1db6` |
 
 ## `reheader` 0.5 release gate

@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-vcf"
-version = "0.5.0"
+version = "0.6.0"
 description = "VCF and BCF inspection, transformation, filtering, indexing, and statistics"
 edition = "2024"
 rust-version = "1.91"

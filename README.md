@@ -18,6 +18,7 @@ The current implementation provides:
   input formats with sample selection and transactional named output.
 - `reheader`: replace headers, synchronize contigs from a FASTA index, or
   rename samples without changing the variant payload.
+- `setgt`: select and replace typed genotypes across VCF and BCF encodings.
 - `validate`: validate VCF 4.1–4.5 or BCF 2.2 structure, schema, typed values,
   cardinality, genotypes, and cross-field invariants.
 - `view`: convert among VCF, BGZF VCF, raw BCF, and BGZF BCF while selecting
@@ -79,6 +80,39 @@ timing. On a 2,000,000-record Apple M2 workload, plain VCF reheadering used
 RSS. BGZF reheadering used 4.64 versus 7.01 MB median peak RSS but took 0.040
 versus 0.020 seconds. The complete distributions, equality hashes, commands,
 and artifact fingerprints are in `PERFORMANCE.md`.
+
+`setgt` edits genotypes through the product's typed record and expression
+layers. Targets are `.`, `./x`, `./.`, `a`, `q`, `b:TAG<CMP>VALUE`, and
+`r:FLOAT`; one principal target can compose with one random fraction.
+Replacements are `.`, `0`, `0p`, `m`, `mp`, `M`, `Mp`, `X`, `p`, `u`, `i`,
+and `c:GT`. Query targets require exactly one include or exclude expression,
+and random selection can use a signed deterministic seed.
+
+```console
+rsomics-vcf setgt -t . -n 0 calls.vcf.gz
+rsomics-vcf setgt -t q -i 'FMT/DP < 10' -n . -O z -o edited.vcf.gz calls.bcf
+rsomics-vcf setgt -t a -t r:0.1 --seed 7 -n c:0/1 calls.vcf
+```
+
+Plain VCF, BGZF VCF, raw BCF, and BGZF BCF share the same edit engine. Named
+output is transactional, and compression workers are accepted only for BGZF
+outputs. Existing valid `INFO/AC` and `INFO/AN` values are recomputed after a
+genotype change; absent tags remain absent, while malformed definitions or
+values fail instead of being preserved stale.
+
+Compatibility is defined against bcftools 1.24 except where failing loud or
+typed per-sample behavior is safer. Ambiguous replacement spellings and
+missing required `FORMAT/AD` values are errors. Query inversion edits the
+selected sample, and partial-missing, binomial, and inversion decisions use
+each sample's actual ploidy rather than a record-wide encoded width. A late
+record error cannot truncate an existing named destination.
+
+The 0.6 release benchmark validates all three operations across VCF, BGZF VCF,
+and BCF after every measured command. On the 2,000,000-record, eight-sample
+Apple M2 workload, median peak RSS is 28.50% to 37.02% below bcftools 1.24.
+Median wall time is 3.20 to 16.60 times slower, so this is a bounded-memory
+claim rather than a throughput claim. Complete distributions and fingerprints
+are in `PERFORMANCE.md`.
 
 `head` writes VCF text, preserves header order, normalizes the standard PASS
 definition, removes BCF-internal `IDX` fields, and renders typed records
