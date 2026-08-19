@@ -19,7 +19,6 @@ mod query_bcf;
 mod query_format;
 mod regions;
 mod reheader;
-#[cfg(test)]
 mod setgt;
 mod validation;
 mod variant_type;

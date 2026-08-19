@@ -1,13 +1,11 @@
 mod counts;
 mod edit;
 
-pub(crate) use counts::{InfoPolicy, reconcile_ac_an};
-pub(crate) use edit::{MissingPolicy, edit_selected};
+pub(crate) use counts::{InfoPolicy, allele_counts, reconcile_ac_an};
+pub(crate) use edit::{Change, MissingPolicy, edit_selected};
 
 #[cfg(test)]
-pub(crate) use counts::{AlleleCounts, allele_counts};
-#[cfg(test)]
-pub(crate) use edit::Change;
+pub(crate) use counts::AlleleCounts;
 
 #[cfg(test)]
 mod tests {

@@ -1,15 +1,24 @@
 mod random;
 mod replacement;
+mod stream;
 mod target;
+
+pub(crate) use replacement::Replacement;
+pub(crate) use stream::{Summary, write, write_parallel};
+pub(crate) use target::{Principal, Target};
 
 use noodles_vcf::{
     self as vcf,
     header::record::value::map::format,
     variant::{
         RecordBuf,
-        record_buf::samples::sample::{
-            Value as SampleValue,
-            value::{Array as SampleArray, Genotype},
+        record::samples::series::value::genotype::Phasing,
+        record_buf::{
+            Samples,
+            samples::sample::{
+                Value as SampleValue,
+                value::{Array as SampleArray, Genotype, genotype::Allele},
+            },
         },
     },
 };
@@ -20,8 +29,16 @@ use crate::{
     genotype::{Change, InfoPolicy, MissingPolicy, edit_selected, reconcile_ac_an},
 };
 use random::Random48;
-use replacement::Replacement;
-use target::{Comparison, Principal, Target};
+use target::Comparison;
+
+#[derive(Clone, Debug)]
+pub(crate) struct Options {
+    pub(crate) output_format: crate::format::OutputFormat,
+    pub(crate) target: Target,
+    pub(crate) replacement: Replacement,
+    pub(crate) query: Option<Query>,
+    pub(crate) seed: i64,
+}
 
 pub(crate) struct Program {
     target: Target,
@@ -162,6 +179,8 @@ impl Program {
         if !selected.iter().any(|selected| *selected) {
             return Ok(Change::default());
         }
+        materialize_missing_genotypes(record, &selected)
+            .rs_with_context(|| format!("record {number}"))?;
         let prepared = self
             .replacement
             .prepare(record, &selected)
@@ -238,6 +257,7 @@ fn read_genotypes(record: &RecordBuf, number: u64) -> Result<Vec<Genotype>> {
                 validate_alleles(record, genotype, number, sample)?;
                 Ok(genotype.clone())
             }
+            Some(None) => Ok([Allele::new(None, Phasing::Unphased)].into_iter().collect()),
             Some(Some(_)) => Err(invalid(
                 number,
                 format!(
@@ -251,6 +271,34 @@ fn read_genotypes(record: &RecordBuf, number: u64) -> Result<Vec<Genotype>> {
             )),
         })
         .collect()
+}
+
+fn materialize_missing_genotypes(record: &mut RecordBuf, selected: &[bool]) -> Result<()> {
+    let keys = record.samples().keys().clone();
+    let genotype = keys
+        .as_ref()
+        .get_index_of("GT")
+        .ok_or_else(|| RsomicsError::InvalidInput("record has no FORMAT/GT field".to_owned()))?;
+    let mut rows = record
+        .samples()
+        .values()
+        .map(|sample| sample.values().to_vec())
+        .collect::<Vec<_>>();
+    for (sample, selected) in rows.iter_mut().zip(selected) {
+        if !selected {
+            continue;
+        }
+        let value = sample.get_mut(genotype).ok_or_else(|| {
+            RsomicsError::InvalidInput("sample has no FORMAT/GT value slot".to_owned())
+        })?;
+        if value.is_none() {
+            *value = Some(SampleValue::Genotype(
+                [Allele::new(None, Phasing::Unphased)].into_iter().collect(),
+            ));
+        }
+    }
+    *record.samples_mut() = Samples::new(keys, rows);
+    Ok(())
 }
 
 fn validate_alleles(

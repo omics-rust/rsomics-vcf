@@ -49,6 +49,9 @@ enum Command {
     /// Replace VCF or BCF headers, contigs, and sample names
     Reheader(commands::reheader::Arguments),
 
+    /// Edit sample genotypes with typed selectors and replacements
+    Setgt(commands::setgt::Arguments),
+
     /// Validate VCF or BCF structure and typed values
     Validate(commands::validate::Arguments),
 
@@ -66,6 +69,7 @@ pub(crate) enum CommandOutput {
     Norm { summary: crate::norm::Summary },
     Query { summary: crate::query::Summary },
     Reheader { summary: crate::reheader::Summary },
+    Setgt { summary: crate::setgt::Summary },
     Validate { report: crate::validate::Report },
     View { summary: crate::view::Summary },
 }
@@ -99,6 +103,9 @@ fn execute(cli: Cli) -> Result<Validation<CommandOutput>> {
         }
         Command::Reheader(arguments) => {
             commands::reheader::execute(arguments, cli.output.json).map(Validation::Valid)
+        }
+        Command::Setgt(arguments) => {
+            commands::setgt::execute(arguments, cli.output.json).map(Validation::Valid)
         }
         Command::Validate(arguments) => commands::validate::execute(arguments, cli.output.json),
         Command::View(arguments) => {
@@ -155,6 +162,22 @@ mod tests {
         assert!(help.contains("-i, --include <EXPR>"), "{help}");
         assert!(help.contains("--threads <INT>"), "{help}");
         assert!(help.contains("-O, --output-type <TYPE>"), "{help}");
+    }
+
+    #[test]
+    fn setgt_help_uses_family_layout() {
+        let error = rsomics_help::try_parse_from::<Cli, _, _>(["rsomics-vcf", "setgt", "--help"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("Input VCF or BCF file"), "{help}");
+        assert!(help.contains("-t, --target-gt <TARGET>"), "{help}");
+        assert!(help.contains("-n, --new-gt <TYPE>"), "{help}");
+        assert!(help.contains("-i, --include <EXPR>"), "{help}");
+        assert!(help.contains("-e, --exclude <EXPR>"), "{help}");
+        assert!(help.contains("--threads <INT>"), "{help}");
+        assert!(help.contains("Targets:"), "{help}");
+        assert!(help.contains("New genotypes:"), "{help}");
+        assert!(help.contains("Output types:"), "{help}");
     }
 
     #[test]
