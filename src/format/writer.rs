@@ -12,10 +12,11 @@ use noodles_vcf::{
     variant::{
         RecordBuf,
         io::Write as _,
+        record::samples::series::value::genotype::Phasing,
         record_buf::{
             Samples,
             info::field::{Value, value::Array},
-            samples::sample::Value as SampleValue,
+            samples::sample::{Value as SampleValue, value::genotype::Allele},
         },
     },
 };
@@ -119,13 +120,9 @@ where
         let result = match self {
             Self::Vcf(writer) => writer.write_variant_record(header, record),
             Self::VcfBgzf(writer) => writer.write_variant_record(header, record),
-            Self::Bcf(writer) => {
-                let record = bcf_record(header, record)?;
-                writer.write_variant_record(header, record.as_ref())
-            }
+            Self::Bcf(writer) => return write_bcf_record(writer.get_mut(), header, record, number),
             Self::BcfRaw(writer) => {
-                let record = bcf_record(header, record)?;
-                writer.write_variant_record(header, record.as_ref())
+                return write_bcf_record(writer.get_mut(), header, record, number);
             }
         };
         result.map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
@@ -246,10 +243,7 @@ where
     ) -> Result<()> {
         let result = match self {
             Self::VcfBgzf(writer) => writer.write_variant_record(header, record),
-            Self::Bcf(writer) => {
-                let record = bcf_record(header, record)?;
-                writer.write_variant_record(header, record.as_ref())
-            }
+            Self::Bcf(writer) => return write_bcf_record(writer.get_mut(), header, record, number),
         };
         result.map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
     }
@@ -512,6 +506,286 @@ fn map_id(line: &[u8]) -> std::io::Result<&str> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
+fn write_bcf_record<W>(
+    writer: &mut W,
+    header: &vcf::Header,
+    record: &RecordBuf,
+    number: u64,
+) -> Result<()>
+where
+    W: Write,
+{
+    let record = bcf_record(header, record)?;
+    let encoded = encode_bcf_record(header, record.as_ref())
+        .map_err(|error| map_write_error(error, &format!("writing variant record {number}")))?;
+    writer
+        .write_all(&encoded)
+        .map_err(|error| map_write_error(error, &format!("writing variant record {number}")))
+}
+
+fn encode_bcf_record(header: &vcf::Header, record: &RecordBuf) -> std::io::Result<Vec<u8>> {
+    let (record, genotype_patch) = pad_bcf_genotypes(record)?;
+    let mut encoder = bcf::io::Writer::from(Vec::new());
+    encoder.write_header(header)?;
+    let record_start = encoder.get_ref().len();
+    encoder.write_variant_record(header, record.as_ref())?;
+    let raw = encoder.into_inner();
+    let mut encoded = raw
+        .get(record_start..)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "BCF writer produced no record bytes",
+            )
+        })?
+        .to_vec();
+    if encoded.len() < 8 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BCF record is shorter than its length fields",
+        ));
+    }
+    let site_len = u32::from_le_bytes(encoded[..4].try_into().unwrap()) as usize;
+    let samples_len = u32::from_le_bytes(encoded[4..8].try_into().unwrap()) as usize;
+    let samples_start = 8usize.checked_add(site_len).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BCF record length overflow",
+        )
+    })?;
+    let expected_len = samples_start.checked_add(samples_len).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BCF record length overflow",
+        )
+    })?;
+    if encoded.len() != expected_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BCF record lengths do not match the encoded record",
+        ));
+    }
+    if let Some(genotype_patch) = genotype_patch {
+        patch_bcf_genotypes(header, &mut encoded[samples_start..], &genotype_patch)?;
+    }
+    Ok(encoded)
+}
+
+struct BcfGenotypePatch {
+    ploidies: Vec<usize>,
+    phased_missing: Vec<Vec<usize>>,
+}
+
+fn pad_bcf_genotypes(
+    record: &RecordBuf,
+) -> std::io::Result<(Cow<'_, RecordBuf>, Option<BcfGenotypePatch>)> {
+    let Some(index) = record.samples().keys().as_ref().get_index_of("GT") else {
+        return Ok((Cow::Borrowed(record), None));
+    };
+    let mut ploidies = Vec::with_capacity(record.samples().values().count());
+    let mut phased_missing = Vec::with_capacity(record.samples().values().count());
+    for sample in record.samples().values() {
+        let Some(Some(SampleValue::Genotype(genotype))) = sample.values().get(index) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "FORMAT/GT is not encoded as a genotype",
+            ));
+        };
+        let ploidy = genotype.as_ref().len();
+        if ploidy == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "FORMAT/GT has zero ploidy",
+            ));
+        }
+        ploidies.push(ploidy);
+        phased_missing.push(
+            genotype
+                .as_ref()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, allele)| {
+                    (allele.position().is_none() && allele.phasing() == Phasing::Phased)
+                        .then_some(index)
+                })
+                .collect(),
+        );
+    }
+    let Some(&max_ploidy) = ploidies.iter().max() else {
+        return Ok((Cow::Borrowed(record), None));
+    };
+    let mixed_ploidy = ploidies.iter().any(|ploidy| *ploidy != max_ploidy);
+    let patch = BcfGenotypePatch {
+        ploidies,
+        phased_missing,
+    };
+    if !mixed_ploidy && patch.phased_missing.iter().all(Vec::is_empty) {
+        return Ok((Cow::Borrowed(record), None));
+    }
+    if !mixed_ploidy {
+        return Ok((Cow::Borrowed(record), Some(patch)));
+    }
+
+    let mut padded = record.clone();
+    let (keys, mut values) = padded.samples().clone().into();
+    for (sample, ploidy) in values.iter_mut().zip(&patch.ploidies) {
+        let Some(Some(SampleValue::Genotype(genotype))) = sample.get_mut(index) else {
+            unreachable!()
+        };
+        genotype
+            .as_mut()
+            .extend((0..max_ploidy - *ploidy).map(|_| Allele::new(None, Phasing::Unphased)));
+    }
+    *padded.samples_mut() = Samples::new(keys, values);
+    Ok((Cow::Owned(padded), Some(patch)))
+}
+
+fn patch_bcf_genotypes(
+    header: &vcf::Header,
+    samples: &mut [u8],
+    patch: &BcfGenotypePatch,
+) -> std::io::Result<()> {
+    const INT8_VECTOR_END: u8 = 0x81;
+
+    let maps = StringMaps::try_from(header)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let genotype_key = maps.strings().get_index_of("GT").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "FORMAT/GT is missing from the BCF string map",
+        )
+    })?;
+    let max_ploidy = *patch.ploidies.iter().max().unwrap();
+    let mut cursor = 0;
+    while cursor < samples.len() {
+        let key = read_bcf_integer(samples, &mut cursor)?;
+        let (count, ty) = read_bcf_type(samples, &mut cursor)?;
+        let width = bcf_type_width(ty)?;
+        let data_len = count
+            .checked_mul(patch.ploidies.len())
+            .and_then(|len| len.checked_mul(width))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "BCF FORMAT series length overflow",
+                )
+            })?;
+        let data_end = cursor.checked_add(data_len).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "BCF FORMAT series length overflow",
+            )
+        })?;
+        if data_end > samples.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "BCF FORMAT series is shorter than its declared data",
+            ));
+        }
+        if key == genotype_key {
+            if ty != 1 || count != max_ploidy {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "BCF FORMAT/GT has an unexpected encoded type or ploidy",
+                ));
+            }
+            for (sample, ploidy) in patch.ploidies.iter().copied().enumerate() {
+                let sample_start = cursor + sample * max_ploidy;
+                for &allele in &patch.phased_missing[sample] {
+                    let value = &mut samples[sample_start + allele];
+                    if *value != 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "BCF phased missing allele is not encoded as missing",
+                        ));
+                    }
+                    *value = 1;
+                }
+                let start = cursor + sample * max_ploidy + ploidy;
+                let end = cursor + (sample + 1) * max_ploidy;
+                if samples[start..end].iter().any(|value| *value != 0) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "BCF FORMAT/GT padding is not missing",
+                    ));
+                }
+                samples[start..end].fill(INT8_VECTOR_END);
+            }
+            return Ok(());
+        }
+        cursor = data_end;
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "BCF record has no FORMAT/GT series",
+    ))
+}
+
+fn read_bcf_type(src: &[u8], cursor: &mut usize) -> std::io::Result<(usize, u8)> {
+    let descriptor = *src.get(*cursor).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "truncated BCF type descriptor",
+        )
+    })?;
+    *cursor += 1;
+    let mut count = usize::from(descriptor >> 4);
+    let ty = descriptor & 0x0f;
+    if count == 15 {
+        count = read_bcf_integer(src, cursor)?;
+    }
+    Ok((count, ty))
+}
+
+fn read_bcf_integer(src: &[u8], cursor: &mut usize) -> std::io::Result<usize> {
+    let (count, ty) = read_bcf_type(src, cursor)?;
+    if count != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BCF typed integer is not scalar",
+        ));
+    }
+    let width = bcf_type_width(ty)?;
+    let end = cursor.checked_add(width).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BCF integer length overflow",
+        )
+    })?;
+    let value = src.get(*cursor..end).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "truncated BCF typed integer",
+        )
+    })?;
+    *cursor = end;
+    let value = match ty {
+        1 => i64::from(i8::from_le_bytes([value[0]])),
+        2 => i64::from(i16::from_le_bytes(value.try_into().unwrap())),
+        3 => i64::from(i32::from_le_bytes(value.try_into().unwrap())),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "BCF typed integer has a non-integer type",
+            ));
+        }
+    };
+    usize::try_from(value)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn bcf_type_width(ty: u8) -> std::io::Result<usize> {
+    match ty {
+        1 | 7 => Ok(1),
+        2 => Ok(2),
+        3 | 5 => Ok(4),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported BCF type {ty}"),
+        )),
+    }
+}
+
 fn bcf_record<'a>(header: &vcf::Header, record: &'a RecordBuf) -> Result<Cow<'a, RecordBuf>> {
     let missing_info = record
         .info()
@@ -761,6 +1035,46 @@ mod tests {
         for key in ["GT", "C", "S"] {
             assert!(sample.get(key).is_some(), "{key}");
         }
+    }
+
+    #[test]
+    fn bcf_encodes_mixed_ploidy_before_later_format_fields() {
+        let raw = "##fileformat=VCFv4.3\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"GT\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"DP\">\n\
+##contig=<ID=chr1,length=1>\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tA\tB\tC\n";
+        let header: vcf::Header = raw.parse().unwrap();
+        let record = vcf::Record::try_from(
+            b"chr1\t1\t.\tA\tC,G\t.\tPASS\t.\tGT:DP\t0/1:1\t.|.:2\t0/1/2:3".as_slice(),
+        )
+        .unwrap();
+        let record = vcf::variant::RecordBuf::try_from_variant_record(&header, &record).unwrap();
+
+        let output = SharedOutput::default();
+        let bytes = output.0.clone();
+        let mut writer = Writer::new(output, OutputFormat::Bcf);
+        writer.write_header(&header, HeaderMode::Full).unwrap();
+        writer.write_record(&header, &record, 1).unwrap();
+        writer.finish().unwrap();
+
+        let compressed = bytes.lock().unwrap().clone();
+        let mut reader = bcf::io::Reader::new(Cursor::new(compressed));
+        let header = reader.read_header().unwrap();
+        let record = reader.record_bufs(&header).next().unwrap().unwrap();
+        for (sample, expected) in [("A", 1), ("B", 2), ("C", 3)] {
+            assert!(matches!(
+                record.samples().get(&header, sample).unwrap().get("DP"),
+                Some(Some(SampleValue::Integer(actual))) if *actual == expected
+            ));
+        }
+        let mut text = vcf::io::Writer::new(Vec::new());
+        text.write_variant_record(&header, &record).unwrap();
+        assert!(
+            String::from_utf8(text.into_inner())
+                .unwrap()
+                .contains(".|.:2")
+        );
     }
 
     #[test]
