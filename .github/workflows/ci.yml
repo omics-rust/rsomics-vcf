@@ -87,10 +87,13 @@ jobs:
           make -j2
           make -C htslib-1.24 -j2 bgzip tabix
           echo "$RUNNER_TEMP/bcftools-1.24" >> "$GITHUB_PATH"
+          echo "BCFTOOLS_PLUGINS=$RUNNER_TEMP/bcftools-1.24/plugins" >> "$GITHUB_ENV"
 
       - name: Verify bcftools oracle
         if: matrix.target == 'linux-x86_64'
-        run: test "$(bcftools --version | sed -n '1p')" = "bcftools 1.24"
+        run: |
+          test "$(bcftools --version | sed -n '1p')" = "bcftools 1.24"
+          bcftools plugin -l | grep -Fx setGT
 
       - name: Fetch pinned validation corpora
         if: matrix.target == 'linux-x86_64'
