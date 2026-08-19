@@ -200,6 +200,7 @@ fn regex_values(values: &[Atom<'_>], regex: &Regex, negate: bool) -> Result<bool
             Atom::Absent | Atom::Missing => regex.is_match(".") != negate,
             Atom::Text(value) => regex.is_match(value) != negate,
             Atom::OwnedText(value) => regex.is_match(value) != negate,
+            Atom::Genotype(value) => regex.is_match(&value.spelling()) != negate,
             Atom::Filter(filter) => match filter {
                 value::Filter::Pass => regex.is_match("PASS") != negate,
                 value::Filter::Missing => regex.is_match(".") != negate,
@@ -253,6 +254,8 @@ fn compare_atoms(
     operator: BinaryOperator,
 ) -> Result<bool, EvaluateError> {
     match (left, right) {
+        (Atom::Genotype(genotype), right) => compare_genotype(genotype, right, operator),
+        (left, Atom::Genotype(genotype)) => compare_genotype(genotype, left, operator),
         (left, right) if is_missing(left) && is_missing(right) => {
             Ok(operator == BinaryOperator::Equal)
         }
@@ -275,6 +278,28 @@ fn compare_atoms(
             _ => Err(EvaluateError::new("cannot compare strings and numbers")),
         },
     }
+}
+
+fn compare_genotype(
+    genotype: &value::Genotype,
+    pattern: &Atom<'_>,
+    operator: BinaryOperator,
+) -> Result<bool, EvaluateError> {
+    if !matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+        return Err(EvaluateError::new(
+            "genotypes support only equality and regex comparisons",
+        ));
+    }
+    let pattern = match pattern {
+        Atom::Absent | Atom::Missing => ".",
+        Atom::Text(pattern) => pattern,
+        Atom::OwnedText(pattern) => pattern,
+        _ => return Err(EvaluateError::new("genotype comparison requires a string")),
+    };
+    let matches = genotype
+        .matches_class(pattern)
+        .unwrap_or_else(|| genotype.spelling() == pattern);
+    Ok(matches == (operator == BinaryOperator::Equal))
 }
 
 fn is_missing(atom: &Atom<'_>) -> bool {

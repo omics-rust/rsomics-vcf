@@ -96,6 +96,94 @@ pub(crate) enum Atom<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Genotype(Vec<Allele>);
 
+impl Genotype {
+    pub(super) fn spelling(&self) -> String {
+        let mut output = String::new();
+        for (index, allele) in self.0.iter().enumerate() {
+            if index > 0 {
+                output.push(match allele.phasing {
+                    Phasing::Phased => '|',
+                    Phasing::Unphased => '/',
+                });
+            }
+            match allele.position {
+                Some(position) => output.push_str(&position.to_string()),
+                None => output.push('.'),
+            }
+        }
+        output
+    }
+
+    pub(super) fn matches_class(&self, pattern: &str) -> Option<bool> {
+        let complete = self.0.iter().all(|allele| allele.position.is_some());
+        let positions: Vec<_> = self.0.iter().filter_map(|allele| allele.position).collect();
+        let ploidy = self.0.len();
+        let reference = complete && positions.iter().all(|position| *position == 0);
+        let alternate = complete && positions.iter().any(|position| *position > 0);
+        let homogeneous = complete
+            && ploidy > 1
+            && positions
+                .first()
+                .is_some_and(|first| positions.iter().all(|position| position == first));
+        let heterogeneous = complete && ploidy > 1 && !homogeneous;
+
+        if pattern.eq_ignore_ascii_case("mis") {
+            return Some(!complete);
+        }
+        if pattern.eq_ignore_ascii_case("ref") {
+            return Some(reference);
+        }
+        if pattern.eq_ignore_ascii_case("alt") {
+            return Some(alternate);
+        }
+        if pattern.eq_ignore_ascii_case("hom") {
+            return Some(homogeneous);
+        }
+        if pattern.eq_ignore_ascii_case("het") {
+            return Some(heterogeneous);
+        }
+        if pattern.eq_ignore_ascii_case("hap") {
+            return Some(complete && ploidy == 1);
+        }
+
+        match pattern {
+            "R" | "r" => Some(complete && ploidy == 1 && reference),
+            "A" | "a" => Some(complete && ploidy == 1 && alternate),
+            _ if pattern.len() == 2 && pattern.bytes().all(|byte| matches!(byte, b'R' | b'r')) => {
+                Some(reference && ploidy > 1)
+            }
+            _ if pattern.len() == 2
+                && pattern
+                    .bytes()
+                    .all(|byte| matches!(byte, b'R' | b'r' | b'A' | b'a'))
+                && pattern.bytes().any(|byte| matches!(byte, b'R' | b'r'))
+                && pattern.bytes().any(|byte| matches!(byte, b'A' | b'a')) =>
+            {
+                Some(complete && ploidy > 1 && reference_alleles(&positions) && alternate)
+            }
+            _ if pattern.len() == 2 && pattern.bytes().all(|byte| matches!(byte, b'A' | b'a')) => {
+                let bytes = pattern.as_bytes();
+                let same_case = bytes[0].is_ascii_uppercase() == bytes[1].is_ascii_uppercase();
+                Some(
+                    complete
+                        && ploidy > 1
+                        && positions.iter().all(|position| *position > 0)
+                        && if same_case {
+                            homogeneous
+                        } else {
+                            heterogeneous
+                        },
+                )
+            }
+            _ => None,
+        }
+    }
+}
+
+fn reference_alleles(positions: &[usize]) -> bool {
+    positions.contains(&0)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Allele {
     pub position: Option<usize>,
@@ -271,6 +359,10 @@ fn read_format<'a>(name: &str, record: &'a RecordBuf) -> Result<Values<'a>, Valu
         .values()
         .map(|sample| match sample.get(name).flatten() {
             Some(value) => sample_atoms(value),
+            None if name == "GT" => Ok(vec![Atom::Genotype(Genotype(vec![Allele {
+                position: None,
+                phasing: Phasing::Phased,
+            }]))]),
             None => Ok(vec![Atom::Missing]),
         })
         .collect::<Result<Vec<_>, ValueError>>()?;

@@ -315,6 +315,23 @@ mod tests {
         evaluate(&expression, header, record).unwrap()
     }
 
+    fn genotype_fixture() -> (vcf::Header, RecordBuf) {
+        let source = include_str!("../../tests/fixtures/expression-genotypes.vcf");
+        let (header, line) = source.trim_end().rsplit_once('\n').unwrap();
+        let header: vcf::Header = format!("{header}\n").parse().unwrap();
+        let raw = vcf::Record::try_from(line.as_bytes()).unwrap();
+        let record = RecordBuf::try_from_variant_record(&header, &raw).unwrap();
+        (header, record)
+    }
+
+    fn genotype_samples(indices: &[usize]) -> Truth {
+        let mut passes = vec![false; 16];
+        for index in indices {
+            passes[*index] = true;
+        }
+        Truth::samples(passes)
+    }
+
     #[test]
     fn site_arithmetic_broadcasts_scalars_and_comparisons_match_any_pair() {
         let (header, record) = fixture();
@@ -364,6 +381,80 @@ mod tests {
         assert_eq!(truth("AF != \".\"", &header, &record), Truth::site(true));
         assert_eq!(truth("CHROM = 'chr1'", &header, &record), Truth::site(true));
         assert_eq!(truth("ID = 'rs2'", &header, &record), Truth::site(true));
+    }
+
+    #[test]
+    fn genotype_named_classes_match_typed_samples() {
+        let (header, record) = genotype_fixture();
+        assert_eq!(
+            truth("GT = 'het'", &header, &record),
+            genotype_samples(&[0, 2, 3, 11, 13, 14])
+        );
+        assert_eq!(
+            truth("GT = 'hom'", &header, &record),
+            genotype_samples(&[1, 8, 12, 15])
+        );
+        assert_eq!(
+            truth("GT = 'ref'", &header, &record),
+            genotype_samples(&[6, 8, 15])
+        );
+        assert_eq!(
+            truth("GT = 'ALT'", &header, &record),
+            genotype_samples(&[0, 1, 2, 3, 7, 11, 12, 13, 14])
+        );
+        assert_eq!(
+            truth("GT = 'mis'", &header, &record),
+            genotype_samples(&[4, 5, 9, 10])
+        );
+        assert_eq!(
+            truth("GT = 'hap'", &header, &record),
+            genotype_samples(&[6, 7])
+        );
+    }
+
+    #[test]
+    fn genotype_symbolic_classes_preserve_case_patterns() {
+        let (header, record) = genotype_fixture();
+        for source in ["GT = 'AA'", "GT = 'aa'"] {
+            assert_eq!(truth(source, &header, &record), genotype_samples(&[1, 12]));
+        }
+        for source in ["GT = 'Aa'", "GT = 'aA'"] {
+            assert_eq!(truth(source, &header, &record), genotype_samples(&[2, 13]));
+        }
+        for (source, expected) in [
+            ("GT = 'RR'", &[8, 15][..]),
+            ("GT = 'RA'", &[0, 3, 11, 14][..]),
+            ("GT = 'AR'", &[0, 3, 11, 14][..]),
+            ("GT = 'R'", &[6][..]),
+            ("GT = 'A'", &[7][..]),
+        ] {
+            assert_eq!(truth(source, &header, &record), genotype_samples(expected));
+        }
+    }
+
+    #[test]
+    fn genotype_exact_spelling_regex_and_inequality_are_typed() {
+        let (header, record) = genotype_fixture();
+        for (source, expected) in [
+            ("GT = './.'", 4),
+            ("GT = '.|.'", 5),
+            ("GT = '.'", 10),
+            ("GT = '0/1/2'", 3),
+            ("GT = '0/1|2'", 11),
+            ("GT ~ '^1[|/]0$'", 0),
+        ] {
+            assert_eq!(
+                truth(source, &header, &record),
+                genotype_samples(&[expected])
+            );
+        }
+        assert_eq!(
+            truth("GT != 'mis'", &header, &record),
+            genotype_samples(&[0, 1, 2, 3, 6, 7, 8, 11, 12, 13, 14, 15])
+        );
+
+        let expression = bind(parse("GT > 'het'").unwrap(), &header).unwrap();
+        assert!(evaluate(&expression, &header, &record).is_err());
     }
 
     #[test]
