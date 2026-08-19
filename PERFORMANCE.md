@@ -1,5 +1,89 @@
 # Performance
 
+## `setgt` 0.6 release gate
+
+The release benchmark compares three genotype edits across plain VCF, BGZF
+VCF, and BCF against the bcftools 1.24 `setGT` plugin. Each path uses three
+warmups and ten measured pairs in alternating order. Every output is decoded
+and normalized before timing and again after each measured command. The
+normalizer removes only bcftools provenance lines and sorts metadata; column,
+record, site, FORMAT, and sample fields must otherwise match exactly.
+
+The measured implementation revision is
+`aa9b9994e23bc15bc3f2c2988efff2f63c48e27b`. The worktree was clean and the
+exact-head four-platform CI run passed. The generated-input manifest, 180 raw
+measurements, summaries, decisions, semantic hashes, and artifact fingerprints
+are retained under
+`/Volumes/KIOXIA/Developments/tmp/rsomics-vcf-setgt-gate-20260819`.
+
+### Decision
+
+All nine paths pass on strict peak-memory advantage. Median RSS is 22.54% to
+35.16% lower than bcftools. This is not a throughput win: median wall time is
+3.07 to 19.64 times slower. The supported claim is bounded-memory genotype
+editing with verified bcftools compatibility, not a faster general replacement.
+
+| Operation | Encoding | rsomics median wall | bcftools median wall | rsomics median RSS | bcftools median RSS | Result |
+|---|---|---:|---:|---:|---:|---|
+| all to missing | VCF | 26.670 s | 8.640 s | 4,653,056 B | 7,143,424 B | 34.86% less RSS |
+| all to missing | BGZF VCF | 20.445 s | 2.740 s | 5,742,592 B | 7,864,320 B | 26.98% less RSS |
+| all to missing | BCF | 27.600 s | 1.405 s | 5,545,984 B | 7,766,016 B | 28.59% less RSS |
+| missing to reference | VCF | 26.550 s | 8.650 s | 4,653,056 B | 7,176,192 B | 35.16% less RSS |
+| missing to reference | BGZF VCF | 20.540 s | 2.770 s | 5,619,712 B | 7,897,088 B | 28.84% less RSS |
+| missing to reference | BCF | 27.245 s | 1.415 s | 5,562,368 B | 7,774,208 B | 28.45% less RSS |
+| query-selected to reference | VCF | 28.255 s | 9.000 s | 4,816,896 B | 7,208,960 B | 33.18% less RSS |
+| query-selected to reference | BGZF VCF | 22.085 s | 2.950 s | 5,742,592 B | 7,938,048 B | 27.66% less RSS |
+| query-selected to reference | BCF | 28.900 s | 1.595 s | 6,053,888 B | 7,815,168 B | 22.54% less RSS |
+
+### Workload and equality
+
+The deterministic fixture contains 2,000,000 biallelic SNVs and eight diploid
+samples with `GT`, `AD`, and `DP`. The three operations replace every genotype
+with missing, replace genotypes containing missing alleles with reference, and
+replace samples selected by `FMT/DP < 10` with reference. The same fixture is
+encoded as VCF, BGZF VCF, and BCF.
+
+Each operation has one canonical SHA-256 across all three encodings and both
+tools:
+
+| Operation | Canonical SHA-256 |
+|---|---|
+| all to missing | `ccccc8f559df14c96b75af7383db31eb950545feb382fd172f61ac561c05aed4` |
+| missing to reference | `711c4d7e025fbb613649b59cac5c234040b53773765358ab58b2ab77ff2d6488` |
+| query-selected to reference | `cac43ecd0a3b4e519df0ef88a75d12c5c01b7004b9a69944724208a49f06adce` |
+
+### Environment and command
+
+- Mac14,3 with Apple M2 and 8,589,934,592 bytes physical memory
+- macOS 26.6.1 build 25G76, Darwin 25.6.0 arm64
+- rustc 1.97.1, commit `8bab26f4f68e0e26f0bb7960be334d5b520ea452`
+- rsomics-vcf 0.5.0 release binary built from the measured revision
+- bcftools 1.24 with HTSlib 1.24
+
+```console
+env CARGO_HOME=/Volumes/KIOXIA/Developments/cargo-home \
+  CARGO_TARGET_DIR=/Volumes/KIOXIA/Developments/cargo-target/rsomics-vcf \
+  TMPDIR=/Volumes/KIOXIA/Developments/tmp \
+  RSOMICS_RUSTC=/opt/homebrew/Cellar/rust/1.97.1/bin/rustc \
+  benchmarks/setgt-vs-bcftools.sh \
+  --records 2000000 --samples 8 --warmups 3 --runs 10 \
+  --results /Volumes/KIOXIA/Developments/tmp/rsomics-vcf-setgt-gate-20260819
+```
+
+### Fingerprints
+
+| Artifact | SHA-256 |
+|---|---|
+| benchmark harness | `a7655077f7766a7b14bfecc592119572068e97c98d319a5d9c594176242de873` |
+| rsomics-vcf binary | `207af8b4af26f75c5916472e3cf6a89f8439ac27f271cc621924aac9b99455b8` |
+| bcftools binary | `33100a6b961c529e915394d53b4737a0f8dd7a164eac352afe4e74e1ced51f60` |
+| rustc binary | `d69d40bfd2e11825feb3538512b6ffcd63de91c35ec36bb876849f0f9f8fe6bd` |
+| generated-input manifest | `49d9fd1b92a3eab9269977305a420178f8e02163c13ceb3fa44138491e7724a9` |
+| raw distribution | `dc9b702d188a6b9685e86d3625556740bdf8520d1c362e8eeb5ad25376717a64` |
+| summary | `cd68e4b4bc808d9c1851f89d8697378c32cfe899cdf9d586693c728cea15a14b` |
+| decision | `595fabec5c4a6407db6064ee1b77d0d1dedd4540d0c4a40f3f16e193da4e6fb2` |
+| equality ledger | `19fcb178371bc803c3cb676298e010b37a45fd11f905ef1e9e4cda72a87d1db6` |
+
 ## `reheader` 0.5 release gate
 
 The release benchmark compares complete plain VCF output and decompressed BGZF
